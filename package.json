@@ -1,16 +1,48 @@
 {
   "name": "ibm-i-source-mcp",
   "version": "0.1.0",
-  "description": "MCP server that reads IBM i source members (RPG/SQLRPGLE/CLLE/DDS) as clean UTF-8 and drops a local copy for analysis.",
+  "description": "MCP server to read, search, browse, upload and compile IBM i (RPG/SQLRPGLE/CLLE/DDS) source members over mapepire (Db2 for i).",
   "type": "module",
   "bin": {
     "ibm-i-source-mcp": "dist/index.js"
   },
+  "files": [
+    "dist",
+    ".env.example",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "check": "npm run build && node --test dist/selfcheck.js"
+    "check": "npm run build && node --test dist/selfcheck.js",
+    "prepare": "npm run build"
   },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ibm-i",
+    "as400",
+    "iseries",
+    "rpg",
+    "rpgle",
+    "sqlrpgle",
+    "mapepire",
+    "db2-for-i",
+    "claude"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SH4RKKK/ibm-i-source-mcp.git"
+  },
+  "homepage": "https://github.com/SH4RKKK/ibm-i-source-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/SH4RKKK/ibm-i-source-mcp/issues"
+  },
+  "author": "SH4RKKK",
+  "license": "MIT",
   "dependencies": {
     "@ibm/mapepire-js": "^0.6.1",
     "@modelcontextprotocol/sdk": "^1.19.0",

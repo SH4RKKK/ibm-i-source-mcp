@@ -39,18 +39,42 @@ IBMI_PASSWORD=...
 `.env` is git-ignored, and it's read from the server's install folder, so it's found no
 matter which directory Claude Code launches the server from.
 
-## Register with Claude Code
+## Install
+
+Requires **Node 18+** and **mapepire-server running on the IBM i** (port 8076).
+
+### Claude Code (recommended)
+
+```sh
+claude mcp add ibmi-source --scope user \
+  -e IBMI_HOST=your.ibmi.host \
+  -e IBMI_USER=YOURUSER \
+  -e IBMI_PASSWORD=yourpassword \
+  -- npx -y ibm-i-source-mcp
+```
+
+That downloads and runs the server via `npx` — no clone needed. Restart Claude Code (or `/mcp`)
+and the tools appear. Any `IBMI_*` var from `.env.example` can be passed with `-e`.
+
+### Or via `.mcp.json`
 
 ```jsonc
-// .mcp.json
 { "mcpServers": { "ibmi-source": {
-    "command": "node",
-    "args": ["/absolute/path/to/ibm-i-source-mcp/dist/index.js"]
+    "command": "npx",
+    "args": ["-y", "ibm-i-source-mcp"],
+    "env": { "IBMI_HOST": "your.ibmi.host", "IBMI_USER": "YOURUSER", "IBMI_PASSWORD": "yourpassword" }
 } } }
 ```
 
-Or via CLI: `claude mcp add ibmi-source --scope user -- node /absolute/path/to/dist/index.js`.
-Standalone: `npx @modelcontextprotocol/inspector node dist/index.js`.
+### From source (development)
+
+```sh
+git clone https://github.com/SH4RKKK/ibm-i-source-mcp && cd ibm-i-source-mcp
+npm install && npm run build
+claude mcp add ibmi-source --scope user -- node "$PWD/dist/index.js"
+```
+
+Standalone / debugging: `npx @modelcontextprotocol/inspector node dist/index.js`.
 
 ## How it works
 
