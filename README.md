@@ -7,14 +7,10 @@ compile it, all from your MCP client.
 
 Working with IBM i source used to mean green screen tools and searching through members by hand. The
 Code for IBM i extension for Visual Studio Code made that far easier, and it is now how many people
-browse and edit. AI assistants have become a normal part of writing code too, but they usually only
-see the copy of the source that a team has exported to a Git repository. Plenty of source still lives
-on the box, and that copy is the one that actually compiles and runs. This server connects an AI
-assistant to that source directly, instead of to a mirror kept in version control.
-
-Reading a member used to also mean pulling down raw EBCDIC and running a conversion script before you
-could read it at all. Here the source comes back as normal Unicode text, with the CCSID conversion
-handled for you.
+browse and edit. AI assistants have become a normal part of writing code too, but they can only help
+with source they can actually see. A lot of IBM i source was never exported to a Git repository. It
+lives only on the box, which is where it compiles and runs. This server connects an AI assistant
+straight to that source, so it can work with code that exists nowhere else.
 
 It reaches Db2 for i through [mapepire](https://mapepire-ibmi.github.io/), the same SQL engine Code for
 IBM i uses. It connects the same way Code for IBM i does too: it opens an SSH session, uploads the
