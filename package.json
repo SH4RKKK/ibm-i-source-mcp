@@ -41,7 +41,7 @@
   "bugs": {
     "url": "https://github.com/SH4RKKK/ibm-i-source-mcp/issues"
   },
-  "author": "SH4RKKK",
+  "author": "Saman",
   "license": "MIT",
   "dependencies": {
     "@ibm/mapepire-js": "^0.6.1",
