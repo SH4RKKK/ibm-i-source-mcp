@@ -56,16 +56,26 @@ test("buildCompileCommand substitutes tokens; override wins; unknown type throws
   assert.throws(() => buildCompileCommand("weird", { tgtlib: "L", name: "N", srclib: "SL", srcfile: "SF", mbr: "M" }), /no compile template/);
 });
 
-test("parseEvfevent pulls msgId/severity/text from ERROR records, skips others", () => {
-  // NOTE: verify this column layout against a real EVFEVENT (plan step 9) and adjust if needed.
+test("parseEvfevent parses a real DDS ERROR record (severity, line, clean text), skips others", () => {
+  // Captured verbatim from a real crtdspf failure on the box.
   const lines = [
-    "FILEID 0 001 000000 ...",
-    "ERROR 0 1 5 5 8 5 12 RNF7030 30 42 The name or indicator TOTAL is not defined.",
-    "PROCESSOR 999 1",
+    "FILEID     0 001 000000 024 MYLIB/QDDSSRC(MYDSPF) 20260101120000 0",
+    "ERROR      0 001 1 001700 000017 045 000017 045 CPD7484 E 20 200 Keyword not valid for this file type.",
+    "PROCESSOR  0 000 1",
   ];
   const errs = parseEvfevent(lines);
   assert.equal(errs.length, 1);
-  assert.equal(errs[0].msgId, "RNF7030");
-  assert.equal(errs[0].severity, 30);
-  assert.match(errs[0].text, /TOTAL is not defined/);
+  assert.equal(errs[0].msgId, "CPD7484");
+  assert.equal(errs[0].severity, 20); // the number, not the "E" class letter
+  assert.equal(errs[0].line, 17);
+  assert.equal(errs[0].toLine, 17);
+  assert.equal(errs[0].text, "Keyword not valid for this file type."); // no stray length token
+});
+
+test("parseEvfevent also handles an ERROR record with no severity-class letter", () => {
+  const lines = ["ERROR 0 001 1 001700 000017 045 000017 045 CPD7484 20 200 Keyword not valid for this file type."];
+  const errs = parseEvfevent(lines);
+  assert.equal(errs[0].severity, 20);
+  assert.equal(errs[0].line, 17);
+  assert.equal(errs[0].text, "Keyword not valid for this file type.");
 });

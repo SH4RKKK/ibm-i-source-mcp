@@ -75,12 +75,14 @@ export function assertCompileCommandAllowed(command: string, extraBlocked: strin
 
 const MSGID = /^[A-Z]{2,4}\d{3,4}$/; // RNF7030, CPD0043, SQL0312, MSG...
 
-// Parse EVFEVENT ERROR records into structured errors. msgId/severity/text are
-// anchored on the msgId token (reliable). Line columns follow the documented
-// ERROR layout (fileId annotClass stmtLine startLine startCol endLine endCol …)
-// but are best-effort — verify against a real compile (plan step 9) and adjust
-// the indices if a box's layout differs. The full listing carries the errors
-// regardless, so a wrong line number degrades gracefully.
+// Parse EVFEVENT ERROR records into structured errors, anchored on the msgId
+// token so we do not depend on the exact width of the leading columns. Verified
+// against a real DDS compile, whose record is:
+//   ERROR 0 001 1 <seqnbr> <startLine> <startCol> <endLine> <endCol> <msgId> <sevClass> <sev> <textLen> <text>
+// The four tokens before the msgId are startLine startCol endLine endCol; after
+// it come an optional one-letter severity class (E/W/I/S), the numeric severity,
+// the text length, then the message. Some compilers omit the class letter, so we
+// detect and skip it. The full listing carries the errors regardless.
 export function parseEvfevent(lines: string[]): CompileError[] {
   const out: CompileError[] = [];
   for (const raw of lines) {
@@ -88,11 +90,18 @@ export function parseEvfevent(lines: string[]): CompileError[] {
     if (t[0] !== "ERROR") continue;
     const i = t.findIndex((tok) => MSGID.test(tok));
     if (i < 0) continue;
-    const severity = Number(t[i + 1]);
-    // t[i+2] is the text length; the message follows it.
-    const text = t.slice(i + 3).join(" ").trim();
-    const startLine = Number(t[4]);
-    const endLine = Number(t[6]);
+
+    // After the msgId: optional severity-class letter, numeric severity, text
+    // length, then the message text.
+    let j = i + 1;
+    if (/^[A-Za-z]$/.test(t[j] ?? "")) j++; // skip the severity class letter
+    const severity = Number(t[j]);
+    const text = t.slice(j + 2).join(" ").trim(); // t[j+1] is the text length
+
+    // Before the msgId: startLine startCol endLine endCol.
+    const startLine = Number(t[i - 4]);
+    const endLine = Number(t[i - 2]);
+
     out.push({
       severity: Number.isFinite(severity) ? severity : 0,
       msgId: t[i],

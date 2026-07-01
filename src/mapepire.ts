@@ -21,6 +21,11 @@ function validLibOrStar(v: string, what: string): string {
 type Row = Record<string, any>;
 const randOver = () => "O" + Math.random().toString(36).slice(2, 11).toUpperCase();
 
+// We fetch a query in a single block rather than paging. This cap is far past
+// any real source member or member list, so hitting it means something is off,
+// and we error instead of silently returning a truncated result.
+const MAX_ROWS = 100_000;
+
 export class MapepireBackend implements SourceBackend {
   readonly transport = "mapepire" as const;
   private job?: InstanceType<typeof SQLJob>;
@@ -52,8 +57,13 @@ export class MapepireBackend implements SourceBackend {
   private async sql(statement: string, parameters?: any[]): Promise<Row[]> {
     const job = await this.connect();
     const q = (job as any).query(statement, parameters ? { parameters } : undefined);
-    const rs = await q.execute(99999);
+    const rs = await q.execute(MAX_ROWS);
     await q.close?.();
+    // No paging: if the server says it is not done, there were more than MAX_ROWS
+    // rows. Fail loudly rather than hand back a truncated member or member list.
+    if (rs.has_results && rs.is_done === false) {
+      throw new Error(`result exceeded ${MAX_ROWS} rows and would be truncated — narrow the request`);
+    }
     return rs.has_results ? (rs.data as Row[]) : [];
   }
 
