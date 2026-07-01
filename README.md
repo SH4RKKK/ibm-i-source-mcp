@@ -1,16 +1,23 @@
 # ibm-i-source-mcp
 
-An [MCP](https://modelcontextprotocol.io) server that gives an AI assistant like Claude Code direct
-access to your **IBM i source members** (RPG, SQLRPGLE, CLLE, DDS). You can find code by describing
-what it does, read it as clean UTF-8, edit it locally, then upload it back and compile it, all from
-your MCP client.
+An [MCP](https://modelcontextprotocol.io) server that lets AI tools like Claude Code work directly
+with the source members on an IBM i, the RPG, SQLRPGLE, CLLE, and DDS that live on the box. You can
+find code by describing what it does, read it as clean UTF-8, edit it locally, then send it back and
+compile it, all from your MCP client.
 
-For years the routine has been to download raw EBCDIC, run a conversion script, and only then read
-the source. This server removes those steps. It connects straight to the box and hands back normal
-Unicode text, with all the CCSID conversion done for you.
+Working with IBM i source used to mean green screen tools and searching through members by hand. The
+Code for IBM i extension for Visual Studio Code made that far easier, and it is now how many people
+browse and edit. AI assistants have become a normal part of writing code too, but they usually only
+see the copy of the source that a team has exported to a Git repository. Plenty of source still lives
+on the box, and that copy is the one that actually compiles and runs. This server connects an AI
+assistant to that source directly, instead of to a mirror kept in version control.
 
-It talks to the IBM i over [mapepire](https://mapepire-ibmi.github.io/), the SQL / Db2 for i service
-on port 8076. That is the same connection stack Code for IBM i uses. The client is pure Node, so
+Reading a member used to also mean pulling down raw EBCDIC and running a conversion script before you
+could read it at all. Here the source comes back as normal Unicode text, with the CCSID conversion
+handled for you.
+
+It talks to the IBM i over [mapepire](https://mapepire-ibmi.github.io/), the SQL service for Db2 for i
+on port 8076. That is the same connection stack Code for IBM i uses, and the client is pure Node, so
 there is nothing to install on Windows.
 
 ## Requirements
