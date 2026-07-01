@@ -1,7 +1,8 @@
 import mapepire from "@ibm/mapepire-js";
 import type { CompileError, CompileOpts, CompileResult, MemberMeta, MemberRef, Profile, SearchMatch, SearchOpts, SearchResult, SourceBackend } from "./types.js";
-import { buildCompileCommand, parseEvfevent } from "./compile.js";
+import { assertCompileCommandAllowed, buildCompileCommand, parseEvfevent } from "./compile.js";
 import { textContains } from "./util.js";
+import { closeSshMapepire, connectSshMapepire } from "./sshMapepire.js";
 
 const { SQLJob } = mapepire;
 
@@ -38,22 +39,14 @@ export class MapepireBackend implements SourceBackend {
     return run;
   }
 
+  // Connect the same way Code for IBM i does: SSH in and run the mapepire jar in
+  // --single mode, speaking its JSON protocol over the exec channel. No daemon,
+  // no open port. The SQLJob and its query engine are unchanged, only the socket
+  // underneath it is an SSH stream instead of a WebSocket (see sshMapepire.ts).
   private async connect(): Promise<InstanceType<typeof SQLJob>> {
     if (this.job) return this.job;
-    const job = new SQLJob();
-    (job.options as any).naming = this.profile.naming;
-    const creds: any = {
-      host: this.profile.host,
-      user: this.profile.user,
-      password: this.profile.password,
-      port: this.profile.mapepirePort,
-      // Both keys: mapepire-js versions differ on the name. Extra one is ignored.
-      ignoreUnauthorized: this.profile.allowSelfCert,
-      rejectUnauthorized: !this.profile.allowSelfCert,
-    };
-    await job.connect(creds);
-    this.job = job;
-    return job;
+    this.job = await connectSshMapepire(this.profile);
+    return this.job;
   }
 
   private async sql(statement: string, parameters?: any[]): Promise<Row[]> {
@@ -199,6 +192,7 @@ export class MapepireBackend implements SourceBackend {
   // Write local text back into the member: clrpfm + chunked insert through the
   // same ovrdbf alias the read path uses. No SFTP needed.
   async writeMember(ref: MemberRef, content: string): Promise<{ warnings: string[] }> {
+    if (this.profile.readOnly) throw new Error("read-only mode (IBMI_READ_ONLY): upload is disabled");
     const lib = validName(ref.library, "library");
     const srcf = validName(ref.sourceFile, "sourceFile");
     const mbr = validName(ref.member, "member");
@@ -255,6 +249,7 @@ export class MapepireBackend implements SourceBackend {
   }
 
   async compile(opts: CompileOpts): Promise<CompileResult> {
+    if (this.profile.readOnly) throw new Error("read-only mode (IBMI_READ_ONLY): compile is disabled");
     const srclib = validName(opts.library, "library");
     const srcf = validName(opts.sourceFile, "sourceFile");
     const mbr = validName(opts.member, "member");
@@ -262,6 +257,8 @@ export class MapepireBackend implements SourceBackend {
     const name = opts.objectName ? validName(opts.objectName, "objectName") : mbr;
     const type = opts.type ?? (await this.memberInfo(srclib, srcf, mbr)).type;
     const command = buildCompileCommand(type, { tgtlib, name, srclib, srcfile: srcf, mbr }, opts.command);
+    // Guard the command (especially a user-supplied override) before it runs as CL.
+    assertCompileCommandAllowed(command, this.profile.blockedCl);
 
     return this.serialize(async () => {
       await this.ensureSpoolTag();
@@ -303,7 +300,7 @@ export class MapepireBackend implements SourceBackend {
   }
 
   async close(): Promise<void> {
-    await this.job?.close?.().catch(() => {});
+    await closeSshMapepire(this.job);
     this.job = undefined;
     this.spoolReady = false;
   }

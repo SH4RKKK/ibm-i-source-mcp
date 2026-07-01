@@ -2,10 +2,13 @@ export interface Profile {
   host: string;
   user: string;
   password: string;
-  mapepirePort: number;          // default 8076
+  sshPort: number;               // default 22
   naming: "system" | "sql";      // default system
-  allowSelfCert: boolean;        // accept mapepire self-signed cert
   sourceFileCcsid: number;       // fallback ccsid for 65535 columns, default 37
+  mapepireJar?: string;          // override jar path on the box (else the uploaded copy)
+  readOnly: boolean;             // when true, upload/compile are refused (default false)
+  hostFingerprint?: string;      // pinned SSH host key fingerprint (SHA256:...); else trust-on-first-use
+  blockedCl: string[];           // extra destructive CL verbs to block on compile, on top of the defaults
 }
 
 export interface MemberRef {

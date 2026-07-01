@@ -2,12 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { extFor, textContains } from "./util.js";
 import { loadProfile } from "./config.js";
-import { buildCompileCommand, parseEvfevent } from "./compile.js";
+import { assertCompileCommandAllowed, buildCompileCommand, parseEvfevent } from "./compile.js";
 
-test("extFor maps known types and falls back to .txt", () => {
+test("extFor uses the member type as the extension", () => {
   assert.equal(extFor("SQLRPGLE"), ".sqlrpgle");
+  assert.equal(extFor("DSPF"), ".dspf"); // display file, not .dds
   assert.equal(extFor("clle"), ".clle");
-  assert.equal(extFor("weird"), ".txt");
+  assert.equal(extFor(""), ".txt");      // no type -> .txt
 });
 
 test("textContains honours case sensitivity", () => {
@@ -19,10 +20,27 @@ test("textContains honours case sensitivity", () => {
 test("loadProfile reads env and applies defaults", () => {
   const p = loadProfile({ IBMI_HOST: "h", IBMI_USER: "u", IBMI_PASSWORD: "pw" } as any);
   assert.equal(p.password, "pw");
-  assert.equal(p.mapepirePort, 8076);
+  assert.equal(p.sshPort, 22);
   assert.equal(p.naming, "system");
-  assert.equal(p.allowSelfCert, true);
   assert.equal(p.sourceFileCcsid, 37);
+  assert.equal(p.readOnly, false);
+  assert.deepEqual(p.blockedCl, []);
+});
+
+test("loadProfile parses safety options", () => {
+  const p = loadProfile({ IBMI_HOST: "h", IBMI_USER: "u", IBMI_PASSWORD: "pw", IBMI_READ_ONLY: "true", IBMI_BLOCKED_CL: "crtpf, dltf" } as any);
+  assert.equal(p.readOnly, true);
+  assert.deepEqual(p.blockedCl, ["crtpf", "dltf"]);
+});
+
+test("assertCompileCommandAllowed permits crt*, blocks destructive and non-create verbs", () => {
+  assert.doesNotThrow(() => assertCompileCommandAllowed("crtdspf file(L/N) srcfile(L/F) srcmbr(M)"));
+  assert.doesNotThrow(() => assertCompileCommandAllowed("crtbndrpg pgm(MYLIB/MYPGM)"));
+  assert.throws(() => assertCompileCommandAllowed("dltlib mylib"), /destructive/);
+  assert.throws(() => assertCompileCommandAllowed("clrpfm file(l/f)"), /destructive/);
+  assert.throws(() => assertCompileCommandAllowed("qsys/dltf file(l/f)"), /destructive/); // lib-qualified
+  assert.throws(() => assertCompileCommandAllowed("dsplib mylib"), /not a create/); // not crt*
+  assert.throws(() => assertCompileCommandAllowed("crtpf file(l/f)", ["crtpf"]), /destructive/); // admin extra
 });
 
 test("loadProfile fails loudly when host/user/password missing", () => {

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { loadProfile } from "./config.js";
+import { listServers, loadProfileFor } from "./config.js";
 import { MapepireBackend } from "./mapepire.js";
 import { findLocalCopy, writeLocalCopy } from "./util.js";
 import type { SourceBackend } from "./types.js";
@@ -16,16 +16,24 @@ process.on("unhandledRejection", (r) => console.error("[ibm-i-source] unhandledR
 process.on("uncaughtException", (e) => console.error("[ibm-i-source] uncaughtException:", e));
 
 const LOCAL_DIR = process.env.IBMI_LOCAL_DIR || "ibmi-src";
-let backend: SourceBackend | undefined;
 
-// mapepire-only. Config is loaded lazily so the server still starts (and lists
-// its tools) when .env is absent; a missing/invalid config then surfaces as a
-// clean tool error rather than a startup crash.
-async function getBackend(): Promise<SourceBackend> {
-  if (backend) return backend;
-  backend = new MapepireBackend(loadProfile());
-  return backend;
+// One backend per server, cached so switching between boxes reuses the open
+// session. Config is loaded lazily so the server still starts (and lists its
+// tools) when no env file is present; a missing/invalid config then surfaces as
+// a clean tool error rather than a startup crash. "default" is the .env server.
+const backends = new Map<string, SourceBackend>();
+async function getBackend(server?: string): Promise<SourceBackend> {
+  const key = server?.toLowerCase() || "default";
+  let be = backends.get(key);
+  if (!be) {
+    be = new MapepireBackend(loadProfileFor(server));
+    backends.set(key, be);
+  }
+  return be;
 }
+
+// Reused by every tool: an optional server name selecting a .env.<name> file.
+const serverArg = z.string().optional().describe("which IBM i to use, named by a .env.<name> file; omit for the default .env server (see list_servers)");
 
 const server = new McpServer({ name: "ibm-i-source", version: "0.1.0" });
 
@@ -36,14 +44,16 @@ server.tool(
     library: z.string().describe("library / schema, e.g. MYLIB"),
     sourceFile: z.string().describe("source physical file, e.g. QRPGLESRC"),
     member: z.string().describe("member name, e.g. MYPGM"),
+    server: serverArg,
   },
-  async ({ library, sourceFile, member }) => {
+  async ({ library, sourceFile, member, server }) => {
     try {
-      const be = await getBackend();
+      const be = await getBackend(server);
       const { content, meta } = await be.readMember({ library, sourceFile, member });
-      const path = writeLocalCopy(LOCAL_DIR, { library, sourceFile, member }, meta.type, content);
+      const { path, backup } = writeLocalCopy(LOCAL_DIR, { library, sourceFile, member }, meta.type, content);
       const header =
         `Saved: ${path}\n` +
+        `Backup: ${backup}\n` +
         `Type: ${meta.type}  CCSID: ${meta.ccsid}  Lines: ${meta.lineCount}` +
         (meta.lastChanged ? `  Changed: ${meta.lastChanged}` : "") +
         `  Transport: ${be.transport}\n\n`;
@@ -64,10 +74,11 @@ server.tool(
     memberType: z.string().optional().describe("limit to a member type, e.g. DSPF, RPGLE"),
     caseSensitive: z.boolean().optional().describe("default false"),
     maxResults: z.number().optional().describe("default 200"),
+    server: serverArg,
   },
-  async (opts) => {
+  async ({ server, ...opts }) => {
     try {
-      const be = await getBackend();
+      const be = await getBackend(server);
       const { matches, truncated } = await be.searchSource(opts);
       const lines = matches.map((m) => {
         const loc = `${m.library}/${m.sourceFile}(${m.member})${m.type ? ` [${m.type}]` : ""}`;
@@ -87,10 +98,10 @@ server.tool(
 server.tool(
   "list_source_files",
   "List the source physical files in a library (e.g. QRPGLESRC, QDDSSRC) with their text descriptions. Use to explore where source lives before listing members.",
-  { library: z.string() },
-  async ({ library }) => {
+  { library: z.string(), server: serverArg },
+  async ({ library, server }) => {
     try {
-      const be = await getBackend();
+      const be = await getBackend(server);
       const files = await be.listSourceFiles(library);
       const lines = files.map((f) => `${f.name}${f.text ? `  — ${f.text}` : ""}`);
       return { content: [{ type: "text", text: `${files.length} source file(s) in ${library}:\n\n` + (lines.join("\n") || "(none)") }] };
@@ -107,10 +118,11 @@ server.tool(
     library: z.string(),
     sourceFile: z.string().optional().describe("limit to one source file, e.g. QDDSSRC"),
     memberType: z.string().optional().describe("limit to a type, e.g. DSPF"),
+    server: serverArg,
   },
-  async ({ library, sourceFile, memberType }) => {
+  async ({ library, sourceFile, memberType, server }) => {
     try {
-      const be = await getBackend();
+      const be = await getBackend(server);
       const members = await be.listMembers(library, sourceFile, memberType);
       const lines = members.map((m) => `${m.sourceFile}(${m.name}) [${m.type || "?"}]${m.text ? `  — ${m.text}` : ""}`);
       return { content: [{ type: "text", text: `${members.length} member(s) in ${library}${sourceFile ? `/${sourceFile}` : ""}:\n\n` + (lines.join("\n") || "(none)") }] };
@@ -129,10 +141,11 @@ server.tool(
     member: z.string(),
     localPath: z.string().optional().describe("path to the edited file; defaults to the local copy from read_source_member"),
     content: z.string().optional().describe("upload this text directly instead of reading a file"),
+    server: serverArg,
   },
-  async ({ library, sourceFile, member, localPath, content }) => {
+  async ({ library, sourceFile, member, localPath, content, server }) => {
     try {
-      const be = await getBackend();
+      const be = await getBackend(server);
       const ref = { library, sourceFile, member };
       const text = content ?? readFileSync(localPath ?? findLocalCopy(LOCAL_DIR, ref), "utf8");
       const { warnings } = await be.writeMember(ref, text);
@@ -155,10 +168,11 @@ server.tool(
     objectName: z.string().optional().describe("compiled object name; default = member"),
     command: z.string().optional().describe("full CL compile command override"),
     type: z.string().optional().describe("override the auto-detected member type, e.g. RPGLE"),
+    server: serverArg,
   },
-  async (opts) => {
+  async ({ server, ...opts }) => {
     try {
-      const be = await getBackend();
+      const be = await getBackend(server);
       const res = await be.compile(opts);
       const errs = res.errors.map((e) => `  [sev ${e.severity}]${e.line ? ` line ${e.line}` : ""} ${e.msgId ?? ""}: ${e.text}`).join("\n");
       const text =
@@ -174,12 +188,29 @@ server.tool(
   },
 );
 
+server.tool(
+  "list_servers",
+  "List the configured IBM i servers you can target with the `server` parameter. The default server is `.env`; each additional `.env.<name>` file adds a server named <name>.",
+  {},
+  async () => {
+    try {
+      const servers = listServers();
+      const text = servers.length
+        ? `Configured servers:\n${servers.map((s) => `- ${s}${s === "default" ? " (.env)" : ` (.env.${s})`}`).join("\n")}`
+        : "No env files found. Create a .env (default server) or .env.<name> files.";
+      return { content: [{ type: "text", text }] };
+    } catch (e: any) {
+      return { isError: true, content: [{ type: "text", text: `list_servers failed: ${e.message}` }] };
+    }
+  },
+);
+
 async function main() {
   await server.connect(new StdioServerTransport());
   console.error("[ibm-i-source] MCP server ready on stdio");
 }
 async function shutdown() {
-  await backend?.close().catch(() => {});
+  await Promise.all([...backends.values()].map((b) => b.close().catch(() => {})));
   process.exit(0);
 }
 process.on("SIGINT", shutdown).on("SIGTERM", shutdown);

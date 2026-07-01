@@ -8,6 +8,7 @@
   },
   "files": [
     "dist",
+    "vendor/mapepire-server.jar",
     ".env.example",
     "README.md",
     "LICENSE",
@@ -49,10 +50,12 @@
     "@ibm/mapepire-js": "^0.6.1",
     "@modelcontextprotocol/sdk": "^1.19.0",
     "dotenv": "^16.4.7",
+    "ssh2": "^1.17.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/ssh2": "^1.15.5",
     "typescript": "^5.7.0"
   }
 }

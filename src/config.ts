@@ -1,33 +1,67 @@
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { config as loadEnv } from "dotenv";
+import { config as loadEnv, parse } from "dotenv";
 import type { Profile } from "./types.js";
 
-// Config lives in a .env file. Look for it in the folder the server is launched
-// from, then in the server's own install folder as a fallback. dotenv never
+// Config lives in env files. We look in the folder the server is launched from,
+// then in the server's own install folder as a fallback. This keeps config in
+// a file for every install method, whether run from source or via npx with a
+// chosen working directory.
+const CONFIG_DIRS = [process.cwd(), join(dirname(fileURLToPath(import.meta.url)), "..")];
+
+// The default server comes from .env, loaded into process.env. dotenv never
 // overrides an already-set variable, so a real environment variable (or the
-// first file found) wins. This keeps all config in a .env for every install
-// method, whether run from source or via npx with a chosen working directory.
-loadEnv({ path: join(process.cwd(), ".env") });
-loadEnv({ path: join(dirname(fileURLToPath(import.meta.url)), "..", ".env") });
+// first file found) wins.
+for (const d of CONFIG_DIRS) loadEnv({ path: join(d, ".env") });
 
-const bool = (v: string | undefined, dflt: boolean) => (v === undefined ? dflt : /^(1|true|yes|on)$/i.test(v));
+// Additional servers live in .env.<name> files (one per box). The filename is
+// the server name, so the set of files is the registry. "default" means .env.
+export function listServers(): string[] {
+  const names = new Set<string>();
+  for (const d of CONFIG_DIRS) {
+    let files: string[] = [];
+    try { files = readdirSync(d); } catch { continue; }
+    for (const f of files) {
+      if (f === ".env") names.add("default");
+      else if (f.startsWith(".env.") && f !== ".env.example") names.add(f.slice(5));
+    }
+  }
+  return [...names].sort();
+}
 
-// Whole config lives in .env — no profiles.json. Exported (env passed in) so
-// selfcheck can exercise it without touching the real environment.
+// Build a Profile for a named server (.env.<name>), or the default (.env /
+// process.env) when no name is given. Exported with env passed in so selfcheck
+// can exercise it without touching the real environment.
+export function loadProfileFor(server?: string): Profile {
+  if (!server || server.toLowerCase() === "default") return loadProfile();
+  for (const d of CONFIG_DIRS) {
+    const p = join(d, `.env.${server}`);
+    if (existsSync(p)) return loadProfile(parse(readFileSync(p)));
+  }
+  const avail = listServers();
+  throw new Error(`no config for server "${server}" (expected a .env.${server} file). Available servers: ${avail.join(", ") || "none"}`);
+}
+
+const bool = (v: string | undefined, dflt: boolean) => (v === undefined || v === "" ? dflt : /^(1|true|yes|on)$/i.test(v));
+const list = (v: string | undefined) => (v ? v.split(/[,\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean) : []);
+
 export function loadProfile(env: NodeJS.ProcessEnv = process.env): Profile {
   const host = env.IBMI_HOST;
   const user = env.IBMI_USER;
   const password = env.IBMI_PASSWORD;
-  if (!host || !user || !password) throw new Error("missing IBMI_HOST, IBMI_USER and/or IBMI_PASSWORD in .env");
+  if (!host || !user || !password) throw new Error("missing IBMI_HOST, IBMI_USER and/or IBMI_PASSWORD in the env file");
 
   return {
     host,
     user,
     password,
-    mapepirePort: Number(env.IBMI_MAPEPIRE_PORT || 8076),
+    sshPort: Number(env.IBMI_SSH_PORT || 22),
     naming: (env.IBMI_NAMING || "system").toLowerCase() === "sql" ? "sql" : "system",
-    allowSelfCert: bool(env.IBMI_ALLOW_SELF_CERT, true),
     sourceFileCcsid: Number(env.IBMI_SOURCE_FILE_CCSID || 37),
+    mapepireJar: env.IBMI_MAPEPIRE_JAR || undefined,
+    readOnly: bool(env.IBMI_READ_ONLY, false),
+    hostFingerprint: env.IBMI_HOST_FINGERPRINT || undefined,
+    blockedCl: list(env.IBMI_BLOCKED_CL),
   };
 }
