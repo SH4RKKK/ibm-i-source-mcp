@@ -1,22 +1,23 @@
 # ibm-i-source-mcp
 
-An [MCP](https://modelcontextprotocol.io) server that gives an AI assistant (Claude Code, etc.)
-first-class access to **IBM i source members** — RPG, SQLRPGLE, CLLE, DDS. Discover code by its
-purpose, read it as clean UTF-8, edit it locally, then **upload and compile** it back on the box
-and read the compiler results.
+An [MCP](https://modelcontextprotocol.io) server that gives an AI assistant like Claude Code direct
+access to your **IBM i source members** (RPG, SQLRPGLE, CLLE, DDS). You can find code by describing
+what it does, read it as clean UTF-8, edit it locally, then upload it back and compile it, all from
+your MCP client.
 
-It replaces the old manual loop — *download raw EBCDIC → convert with a script → read* — with a
-direct, CCSID-correct pipeline. All conversion is handled for you; source comes back as normal
-Unicode text.
+For years the routine has been to download raw EBCDIC, run a conversion script, and only then read
+the source. This server removes those steps. It connects straight to the box and hands back normal
+Unicode text, with all the CCSID conversion done for you.
 
-Talks to the IBM i over **[mapepire](https://mapepire-ibmi.github.io/)** (SQL / Db2 for i, port 8076) —
-the same connection stack Code for IBM i uses. Pure Node client; nothing to install on Windows.
+It talks to the IBM i over [mapepire](https://mapepire-ibmi.github.io/), the SQL / Db2 for i service
+on port 8076. That is the same connection stack Code for IBM i uses. The client is pure Node, so
+there is nothing to install on Windows.
 
 ## Requirements
 
-- **Node 18+** on the client.
-- **`mapepire-server` running on the IBM i** (`yum install mapepire-server`, port 8076).
-- A user profile with authority to the source libraries. Compiling/uploading needs write authority to the targets.
+- Node 18 or newer on the client.
+- `mapepire-server` running on the IBM i (`yum install mapepire-server`, port 8076).
+- A user profile with authority to the source libraries. Uploading and compiling also need write authority to the target objects.
 
 ## Install
 
@@ -30,8 +31,8 @@ claude mcp add ibmi-source --scope user \
   -- npx -y ibm-i-source-mcp
 ```
 
-`npx` downloads and runs the server — no clone, no build. Restart Claude Code (or run `/mcp`) and
-the tools appear. Any variable from [Configuration](#configuration) can be passed with `-e`.
+`npx` downloads and runs the server for you, so there is no clone or build step. Restart Claude Code
+(or run `/mcp`) and the tools show up. You can pass any variable from the Configuration section with `-e`.
 
 ### Or via `.mcp.json`
 
@@ -48,90 +49,93 @@ the tools appear. Any variable from [Configuration](#configuration) can be passe
 ```sh
 git clone https://github.com/SH4RKKK/ibm-i-source-mcp && cd ibm-i-source-mcp
 npm install && npm run build
-cp .env.example .env      # fill in IBMI_HOST / IBMI_USER / IBMI_PASSWORD
+cp .env.example .env      # fill in IBMI_HOST, IBMI_USER, IBMI_PASSWORD
 claude mcp add ibmi-source --scope user -- node "$PWD/dist/index.js"
 ```
 
-Debug it standalone with the MCP Inspector: `npx @modelcontextprotocol/inspector node dist/index.js`.
+To debug it on its own, use the MCP Inspector: `npx @modelcontextprotocol/inspector node dist/index.js`.
 
 ## Configuration
 
-Config is read from environment variables (via `-e` flags / the `env` block above), or from a
-git-ignored `.env` file when running from source. `.env` is loaded from the server's own install
-folder, so it's found no matter where the server is launched.
+Configuration comes from environment variables (the `-e` flags or the `env` block above), or from a
+git-ignored `.env` file when you run from source. The `.env` is read from the server's own install
+folder, so it is found no matter which directory launches the server.
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `IBMI_HOST` | ✅ | — | IBM i host / IP |
-| `IBMI_USER` | ✅ | — | user profile |
-| `IBMI_PASSWORD` | ✅ | — | password |
-| `IBMI_MAPEPIRE_PORT` | | `8076` | mapepire daemon port |
-| `IBMI_NAMING` | | `system` | SQL naming: `system` or `sql` |
-| `IBMI_ALLOW_SELF_CERT` | | `true` | accept mapepire self-signed cert |
-| `IBMI_SOURCE_FILE_CCSID` | | `37` | EBCDIC page used for CCSID-65535 source columns |
-| `IBMI_LOCAL_DIR` | | `ibmi-src` | where local copies are written |
+| `IBMI_HOST` | yes | | IBM i host or IP |
+| `IBMI_USER` | yes | | user profile |
+| `IBMI_PASSWORD` | yes | | password |
+| `IBMI_MAPEPIRE_PORT` | no | `8076` | mapepire daemon port |
+| `IBMI_NAMING` | no | `system` | SQL naming, `system` or `sql` |
+| `IBMI_ALLOW_SELF_CERT` | no | `true` | accept mapepire self-signed cert |
+| `IBMI_SOURCE_FILE_CCSID` | no | `37` | EBCDIC page used for CCSID 65535 source columns |
+| `IBMI_LOCAL_DIR` | no | `ibmi-src` | where local copies are written |
 
 ## Tools
 
-**Discover**
-- **`list_source_files`** — `library` → the source physical files (e.g. `QRPGLESRC`, `QDDSSRC`) with their text descriptions.
-- **`list_members`** — `library` (+ optional `sourceFile`, `memberType`) → every member with its **name, type, and TEXT description**, like browsing PDM/RDi.
-- **`search_source`** — `library`, `searchTerm` (+ optional `sourceFile`, `memberType`, `caseSensitive`, `maxResults`) → a member surfaces if the term is in its **name**, its **TEXT description**, or its **code**, and each hit says which. Lets you find a member by its *purpose* (e.g. a Dutch word like `afdeling`) even when the word isn't in the source itself.
+### Discover
 
-**Read**
-- **`read_source_member`** — `library`, `sourceFile`, `member` → returns the source as clean UTF-8 and saves an editable local copy at `ibmi-src/<lib>/<file>/<member>.<ext>`, plus metadata (type, ccsid, line count, last-changed).
+- **`list_source_files`**: give it a library and it returns the source physical files (like `QRPGLESRC` or `QDDSSRC`) with their text descriptions.
+- **`list_members`**: give it a library, and optionally a `sourceFile` or `memberType`, and it lists every member with its name, type, and text description, the way you would browse in PDM or RDi.
+- **`search_source`**: give it a library and a `searchTerm`. A member turns up if the term is in its name, its text description, or its code, and each result tells you which. This lets you find a member by its purpose, for example a Dutch word like `afdeling`, even when that word never appears in the source itself.
 
-**Change**
-- **`upload_source_member`** — `library`, `sourceFile`, `member` (+ optional `localPath` / `content`) → writes the edited copy back into the member. Defaults to the local copy from `read_source_member`. Reports any lines truncated to the source record length.
-- **`compile_member`** — `library`, `sourceFile`, `member` (+ optional `targetLibrary` [default `*CURLIB`], `objectName`, `command`, `type`) → compiles and returns **SUCCESS/FAILED**, the compiler **spool listing**, and **structured errors** parsed from the EVFEVENT event file. Built-in `crt*` command per source type, overridable with `command`. Pass a real `targetLibrary` to get the structured errors.
+### Read
+
+- **`read_source_member`**: give it a library, source file, and member. It returns the source as clean UTF-8 and saves an editable local copy at `ibmi-src/<lib>/<file>/<member>.<ext>`, along with metadata like type, ccsid, line count, and last changed date.
+
+### Change
+
+- **`upload_source_member`**: give it a library, source file, and member, and optionally a `localPath` or `content`. It writes the edited copy back into the member, defaulting to the local copy that `read_source_member` saved. If a line is longer than the source record length, it tells you the line was truncated.
+- **`compile_member`**: give it a library, source file, and member, and optionally `targetLibrary` (defaults to `*curlib`), `objectName`, `command`, or `type`. It compiles the member and returns whether it succeeded, the compiler spool listing, and the structured errors parsed from the EVFEVENT event file. It picks a `crt` command based on the source type, and you can override that with `command`. Pass a real `targetLibrary` if you want the structured errors.
 
 ## Example workflow
 
-> "Find the display file that shows department info — it's a Dutch app."
+Say you ask: "find the display file that shows department information, and note the app is in Dutch."
 
-1. `search_source(library, "afdeling", memberType: "DSPF")` → surfaces the DDS member whose TEXT description is *"Onderhoud afdelingsgegevens"*.
-2. `read_source_member(...)` → the DDS lands locally as UTF-8; the assistant reads it.
-3. Edit the local copy (by hand or with the assistant).
-4. `upload_source_member(...)` → the change goes back into the member.
-5. `compile_member(..., targetLibrary: "DEVLIB")` → `SUCCESS`, or `FAILED` with the listing and the exact `RNF…` errors and line numbers to fix.
+1. `search_source(library, "afdeling", memberType: "DSPF")` turns up the DDS member whose text description reads "Onderhoud afdelingsgegevens".
+2. `read_source_member(...)` brings the DDS down locally as UTF-8 so the assistant can read it.
+3. You edit the local copy, by hand or with the assistant's help.
+4. `upload_source_member(...)` sends the change back into the member.
+5. `compile_member(..., targetLibrary: "DEVLIB")` reports SUCCESS, or FAILED with the listing and the exact message IDs and line numbers to fix.
 
 ## How it works
 
-- **Read:** `ovrdbf` a job-scoped alias at the member → `select srcdta` (cast to `IBMI_SOURCE_FILE_CCSID` when the column is CCSID 65535) → join lines. A single serialized SQL job keeps the `*job`-scoped override safe from interleaving.
-- **Discover:** members and their TEXT come from `qsys2.object_statistics` + a lateral `qsys2.partition_statistics` call; source files from `qsys2.systables` (`file_type = 'S'`). Search adds a per-member `like` scan of `srcdta` for code hits.
-- **Upload:** `clrpfm` + chunked `insert` of SRCSEQ/SRCDTA rows through the alias. Over-length lines are truncated **with a warning** — never silently dropped.
-- **Compile:** run the `crt*` command with `option(*eventf)`, read the held spool via `qsys2.spooled_file_info` + `systools.spooled_file_data`, and parse the EVFEVENT file for structured `{severity, line, msgId, text}` errors.
+- **Read**: it runs `ovrdbf` to point a job-scoped alias at the member, selects `srcdta` (casting to `IBMI_SOURCE_FILE_CCSID` when the column is CCSID 65535), and joins the lines. A single serialized SQL job keeps that job-scoped override from getting tangled up with other calls.
+- **Discover**: members and their text come from `qsys2.object_statistics` joined with a lateral `qsys2.partition_statistics` call, and source files come from `qsys2.systables` where `file_type = 'S'`. Search adds a per-member `like` scan of `srcdta` for code hits.
+- **Upload**: it runs `clrpfm`, then inserts the SRCSEQ and SRCDTA rows back through the alias in chunks. If a line is longer than the record length, it is truncated and reported rather than dropped silently.
+- **Compile**: it runs the `crt` command with `option(*eventf)`, reads the held spool file through `qsys2.spooled_file_info` and `systools.spooled_file_data`, and parses the EVFEVENT file into structured errors with severity, line, message id, and text.
 
-## Notes / limits
+## Notes and limits
 
-- Search is O(members) SQL round-trips — scope with `library` + `sourceFile` for speed.
-- The EVFEVENT `ERROR`-record parser is best-effort on line numbers (msgId/severity/text are reliable).
-- `npm run check` builds and runs the self-checks (`node:test`).
+- Search makes one SQL round-trip per member, so scope it with a library and source file when you can.
+- The EVFEVENT parser is reliable on message id, severity, and text, and best-effort on line numbers.
+- `npm run check` builds the project and runs the self-checks (`node:test`).
 
 ## Project layout
 
 ```
 src/
-  index.ts     MCP server, tool registration
-  config.ts    .env / env-var loader
-  mapepire.ts  mapepire backend (read/search/list/write/compile over SQL)
-  compile.ts   compile command templates + EVFEVENT parser
-  util.ts      type→extension, local-copy writer, text match
-  types.ts     shared types + SourceBackend interface
-  selfcheck.ts asserts for the parse/config logic
+  index.ts     MCP server and tool registration
+  config.ts    .env and env-var loader
+  mapepire.ts  mapepire backend (read, search, list, write, compile over SQL)
+  compile.ts   compile command templates and EVFEVENT parser
+  util.ts      type-to-extension map, local-copy writer, text match
+  types.ts     shared types and the SourceBackend interface
+  selfcheck.ts asserts for the parse and config logic
 ```
 
 ## Acknowledgements
 
-This is an independent project, written from scratch, but it stands on the shoulders of prior work:
+This project was written from scratch, but it builds on the work of others:
 
-- **[IBM/ibmi-mcp-server](https://github.com/IBM/ibmi-mcp-server)** (Apache-2.0) — reference for the MCP + mapepire server architecture. No code was copied.
-- **[codefori/vscode-ibmi](https://github.com/codefori/vscode-ibmi)** (MIT) — reference for the Db2-for-i SQL patterns used to read members, list source, and drive compiles.
-- **[mapepire](https://mapepire-ibmi.github.io/)** (Apache-2.0) — the Db2 for i client this server talks over.
+- **[IBM/ibmi-mcp-server](https://github.com/IBM/ibmi-mcp-server)** (Apache-2.0): a reference for the MCP and mapepire server architecture. No code was copied.
+- **[codefori/vscode-ibmi](https://github.com/codefori/vscode-ibmi)** (MIT): a reference for the Db2 for i SQL patterns used to read members, list source, and drive compiles.
+- **[mapepire](https://mapepire-ibmi.github.io/)** (Apache-2.0): the Db2 for i client this server talks over.
 
-Grateful to those teams and the IBM i community.
+Thanks to those teams and the wider IBM i community.
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Dependencies retain their own licenses
-(Apache-2.0, MIT, BSD-2-Clause), all compatible with Apache-2.0.
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). The dependencies keep their own licenses
+(Apache-2.0, MIT, BSD-2-Clause), all of which are compatible with Apache-2.0.
