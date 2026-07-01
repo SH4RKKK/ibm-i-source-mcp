@@ -3,10 +3,12 @@ import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
 import type { Profile } from "./types.js";
 
-// Load .env from the install root (one level up from dist/config.js), NOT the
-// process cwd — so it's found no matter which folder Claude Code launches the
-// server from. Inline env vars (e.g. an mcp.json `env` block) still take
-// precedence, since dotenv never overrides an already-set variable.
+// Config lives in a .env file. Look for it in the folder the server is launched
+// from, then in the server's own install folder as a fallback. dotenv never
+// overrides an already-set variable, so a real environment variable (or the
+// first file found) wins. This keeps all config in a .env for every install
+// method, whether run from source or via npx with a chosen working directory.
+loadEnv({ path: join(process.cwd(), ".env") });
 loadEnv({ path: join(dirname(fileURLToPath(import.meta.url)), "..", ".env") });
 
 const bool = (v: string | undefined, dflt: boolean) => (v === undefined ? dflt : /^(1|true|yes|on)$/i.test(v));

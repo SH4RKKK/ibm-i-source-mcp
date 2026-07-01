@@ -21,45 +21,49 @@ there is nothing to install on Windows.
 
 ## Install
 
-### Claude Code (recommended)
+All settings live in a `.env` file. Create it, install the server, then register it with Claude Code.
 
-```sh
-claude mcp add ibmi-source --scope user \
-  -e IBMI_HOST=your.ibmi.host \
-  -e IBMI_USER=YOURUSER \
-  -e IBMI_PASSWORD=yourpassword \
-  -- npx -y ibm-i-source-mcp
-```
-
-`npx` downloads and runs the server for you, so there is no clone or build step. Restart Claude Code
-(or run `/mcp`) and the tools show up. You can pass any variable from the Configuration section with `-e`.
-
-### Or via `.mcp.json`
-
-```jsonc
-{ "mcpServers": { "ibmi-source": {
-    "command": "npx",
-    "args": ["-y", "ibm-i-source-mcp"],
-    "env": { "IBMI_HOST": "your.ibmi.host", "IBMI_USER": "YOURUSER", "IBMI_PASSWORD": "yourpassword" }
-} } }
-```
-
-### From source (development)
+### 1. Get the code and build
 
 ```sh
 git clone https://github.com/SH4RKKK/ibm-i-source-mcp && cd ibm-i-source-mcp
 npm install && npm run build
-cp .env.example .env      # fill in IBMI_HOST, IBMI_USER, IBMI_PASSWORD
+```
+
+### 2. Create your .env
+
+```sh
+cp .env.example .env
+```
+
+Then fill in the required values. The optional ones are listed under Configuration.
+
+```
+IBMI_HOST=your.ibmi.host
+IBMI_USER=YOURUSER
+IBMI_PASSWORD=yourpassword
+```
+
+### 3. Register with Claude Code
+
+```sh
 claude mcp add ibmi-source --scope user -- node "$PWD/dist/index.js"
 ```
 
+Restart Claude Code, or run `/mcp`, and the tools show up. The server reads the `.env` from its own
+folder, so it works no matter which directory Claude Code launches it from.
+
 To debug it on its own, use the MCP Inspector: `npx @modelcontextprotocol/inspector node dist/index.js`.
+
+Once the package is published to npm you can run it with `npx -y ibm-i-source-mcp` instead of building
+from source. In that case keep your `.env` in a folder of your choice and set that folder as the
+server's working directory in your MCP config, since an npx package has no project folder of its own.
 
 ## Configuration
 
-Configuration comes from environment variables (the `-e` flags or the `env` block above), or from a
-git-ignored `.env` file when you run from source. The `.env` is read from the server's own install
-folder, so it is found no matter which directory launches the server.
+All configuration lives in a `.env` file. The server looks for `.env` in the folder it is launched
+from, then in its own install folder. A real environment variable, if one is set, takes precedence
+over the file.
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
