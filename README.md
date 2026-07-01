@@ -133,5 +133,5 @@ Grateful to those teams and the IBM i community.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Dependencies retain their own licenses (Apache-2.0, MIT, BSD-2-Clause),
-which are compatible with this project's MIT license.
+Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Dependencies retain their own licenses
+(Apache-2.0, MIT, BSD-2-Clause), all compatible with Apache-2.0.
