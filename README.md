@@ -121,6 +121,17 @@ src/
   selfcheck.ts asserts for the parse/config logic
 ```
 
+## Acknowledgements
+
+This is an independent project, written from scratch, but it stands on the shoulders of prior work:
+
+- **[IBM/ibmi-mcp-server](https://github.com/IBM/ibmi-mcp-server)** (Apache-2.0) — reference for the MCP + mapepire server architecture. No code was copied.
+- **[codefori/vscode-ibmi](https://github.com/codefori/vscode-ibmi)** (MIT) — reference for the Db2-for-i SQL patterns used to read members, list source, and drive compiles.
+- **[mapepire](https://mapepire-ibmi.github.io/)** (Apache-2.0) — the Db2 for i client this server talks over.
+
+Grateful to those teams and the IBM i community.
+
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). Dependencies retain their own licenses (Apache-2.0, MIT, BSD-2-Clause),
+which are compatible with this project's MIT license.
