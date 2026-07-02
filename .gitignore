@@ -5,3 +5,4 @@ dist/
 !.env.example
 ibmi-src/
 .ibmi-known-hosts.json
+sbom.cdx.json

@@ -27,22 +27,39 @@ there is nothing to build on Windows either.
 
 ## Install
 
-All settings live in a `.env` file. Create it, install the server, then register it with Claude Code.
+Run it straight from npm with npx (no build), or clone and build from source. Either way, all
+settings live in a `.env` file (see Configuration).
 
-### 1. Get the code and build
+### Option A: from npm
+
+Register the server with Claude Code:
+
+```sh
+claude mcp add ibmi-source --scope user -- npx -y ibm-i-source-mcp
+```
+
+Or install it once and point at the binary:
+
+```sh
+npm install -g ibm-i-source-mcp
+claude mcp add ibmi-source --scope user -- ibm-i-source-mcp
+```
+
+Then create a `.env` with your connection details in the folder Claude Code launches the server from,
+and restart Claude Code or run `/mcp`. A package installed from npm has no project folder of its own,
+so it reads the `.env` from its working directory. If you want the `.env` to travel with the server,
+use Option B.
+
+### Option B: from source
 
 ```sh
 git clone https://github.com/SH4RKKK/ibm-i-source-mcp && cd ibm-i-source-mcp
 npm install && npm run build
-```
-
-### 2. Create your .env
-
-```sh
 cp .env.example .env
+claude mcp add ibmi-source --scope user -- node "$PWD/dist/index.js"
 ```
 
-Then fill in the required values. The optional ones are listed under Configuration.
+Fill in the required values in your `.env` (the optional ones are under Configuration):
 
 ```
 IBMI_HOST=your.ibmi.host
@@ -50,20 +67,10 @@ IBMI_USER=YOURUSER
 IBMI_PASSWORD=yourpassword
 ```
 
-### 3. Register with Claude Code
+Restart Claude Code or run `/mcp` and the tools show up. Built from source, the server reads the `.env`
+from its own folder, so it works no matter which directory Claude Code launches it from.
 
-```sh
-claude mcp add ibmi-source --scope user -- node "$PWD/dist/index.js"
-```
-
-Restart Claude Code, or run `/mcp`, and the tools show up. The server reads the `.env` from its own
-folder, so it works no matter which directory Claude Code launches it from.
-
-To debug it on its own, use the MCP Inspector: `npx @modelcontextprotocol/inspector node dist/index.js`.
-
-Once the package is published to npm you can run it with `npx -y ibm-i-source-mcp` instead of building
-from source. In that case keep your `.env` in a folder of your choice and set that folder as the
-server's working directory in your MCP config, since an npx package has no project folder of its own.
+To debug it on its own, use the MCP Inspector: `npx @modelcontextprotocol/inspector npx -y ibm-i-source-mcp`.
 
 ## Configuration
 
@@ -157,9 +164,9 @@ commands. Treat it like any tool that can act on the box, and lean on these cont
   skip trust on first use.
 
   To get the fingerprint, connect once and let the server record it, then look in
-  `.ibmi-known-hosts.json`. You will see a line like `"ibmi.example.com:22": "SHA256:abc123..."`. Copy that
-  `SHA256:...` value into `IBMI_HOST_FINGERPRINT` and from then on it is enforced, no longer relying on
-  the file. If you want to check it out of band first, from a trusted network run
+  `.ibmi-known-hosts.json`. You will see a line like `"ibmi.example.com:22": "SHA256:abc123..."`. Copy
+  that `SHA256:...` value into `IBMI_HOST_FINGERPRINT` and from then on it is enforced, no longer relying
+  on the file. If you want to check it out of band first, from a trusted network run
   `ssh-keyscan <host> | ssh-keygen -lf -`, which prints the same `SHA256:...` fingerprint, and compare.
   The compile default blocklist (`dltlib`, `clrpfm`, and so on) is listed in `.env.example`, and the
   guard only allows create commands in the first place.

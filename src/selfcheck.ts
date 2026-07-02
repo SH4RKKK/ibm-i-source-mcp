@@ -64,9 +64,10 @@ test("buildCompileCommand substitutes tokens; override wins; unknown type throws
 });
 
 test("parseEvfevent parses a real DDS ERROR record (severity, line, clean text), skips others", () => {
-  // Captured verbatim from a real crtdspf failure on the box.
+  // The ERROR record is the real layout from a crtdspf failure. The FILEID line
+  // (which the parser skips) has its paths anonymized.
   const lines = [
-    "FILEID     0 001 000000 024 MYLIB/QDDSSRC(MYDSPF) 20260101120000 0",
+    "FILEID     0 001 000000 021 MYLIB/QDDSSRC(MYDSPF) 20260101120000 0",
     "ERROR      0 001 1 001700 000017 045 000017 045 CPD7484 E 20 200 Keyword not valid for this file type.",
     "PROCESSOR  0 000 1",
   ];
