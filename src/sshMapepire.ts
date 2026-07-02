@@ -12,16 +12,14 @@ import type { Profile } from "./types.js";
 const { SQLJob } = mapepire;
 type Job = InstanceType<typeof SQLJob>;
 
-// The mapepire server jar we ship and run on the box in --single mode. This is
-// exactly what Code for IBM i does: no daemon to install, no port to open, we
-// speak the mapepire JSON protocol over an SSH exec channel as the SSH user.
+// The mapepire jar we ship and run on the box in --single mode, like Code for
+// IBM i. No daemon, no open port: we speak the mapepire protocol over SSH.
 const BUNDLED_JAR = join(dirname(fileURLToPath(import.meta.url)), "..", "vendor", "mapepire-server.jar");
 const REMOTE_SUBDIR = ".ibm-i-source-mcp";
 const REMOTE_JAR_NAME = "mapepire-server.jar";
 
-// SHA-256 of the jar we ship (mapepire-server 2.3.5). We verify the bundled file
-// against this before ever uploading or running it, so a tampered artifact is
-// refused rather than executed on the box. Update this when bumping the jar.
+// SHA-256 of the shipped jar, verified before upload/run so a tampered file is
+// refused. Update when bumping the jar.
 const BUNDLED_JAR_SHA256 = "41b1cfa67778ac204426f1dda0b51bd3f45fe3b89c91121d968660140acc0876";
 let jarVerified = false;
 function verifyBundledJar(): void {
@@ -33,11 +31,9 @@ function verifyBundledJar(): void {
   jarVerified = true;
 }
 
-// SSH host keys, trust-on-first-use. The first connection to a host records its
-// key fingerprint; later connections must match or we refuse (possible MITM).
-// IBMI_HOST_FINGERPRINT pins it explicitly and skips the file entirely.
-// Stored next to the install (not the process cwd, which is unpredictable for an
-// MCP server) so it is always in the same, findable place.
+// SSH host keys, trust on first use: the first connect records the fingerprint,
+// later ones must match or we refuse. IBMI_HOST_FINGERPRINT pins it and skips
+// the file. Kept next to the install, since an MCP server's cwd is unreliable.
 const INSTALL_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 const knownHostsPath = () => join(INSTALL_DIR, ".ibmi-known-hosts.json");
 function loadKnownHosts(): Record<string, string> {
@@ -49,18 +45,15 @@ function saveKnownHost(key: string, fp: string): void {
   try { writeFileSync(knownHostsPath(), JSON.stringify(all, null, 2) + "\n"); } catch { /* best effort */ }
 }
 const hostFp = (key: Buffer) => "SHA256:" + createHash("sha256").update(key).digest("base64").replace(/=+$/, "");
-// Compare fingerprints forgivingly: an optional "SHA256:" prefix and any padding
-// or surrounding whitespace should not matter. The base64 body stays case
-// sensitive. So "SHA256:abc", "abc", and "abc==" all match the same key.
+// Match ignoring an optional "SHA256:" prefix and padding; the base64 body stays case sensitive.
 const normFp = (fp: string) => fp.trim().replace(/^sha256:/i, "").replace(/=+$/, "");
 const fpEq = (a: string, b: string) => normFp(a) === normFp(b);
 
-// A WebSocket-shaped shim over an ssh2 exec stream. mapepire-js's SQLJob only
-// touches socket.send()/close() and the message/error/close events, so this is
-// all it needs. Responses are newline-delimited JSON on the jar's stdout.
+// A WebSocket shaped shim over the ssh2 exec stream. SQLJob only uses send/close
+// and the message/error/close events. Responses are newline delimited JSON.
 class StreamSocket extends EventEmitter {
   private buf = "";
-  stderr = ""; // last bit of the jar's stderr, kept for error messages
+  stderr = ""; // tail of the jar's stderr, for error messages
   constructor(private stream: import("ssh2").ClientChannel) {
     super();
     stream.on("data", (d: Buffer) => {
@@ -72,8 +65,7 @@ class StreamSocket extends EventEmitter {
         if (line) this.emit("message", line);
       }
     });
-    // The jar logs to stderr; keep it off our stdout (which carries JSON-RPC),
-    // but hold on to the tail so a failed launch has something to report.
+    // Keep jar logs off stdout, but hold the tail so a failed launch can report.
     stream.stderr?.on("data", (d: Buffer) => { this.stderr = (this.stderr + d.toString("utf8")).slice(-4000); });
     stream.on("error", (e: Error) => this.emit("error", e));
     stream.on("close", (...a: unknown[]) => this.emit("close", ...a));
@@ -82,15 +74,15 @@ class StreamSocket extends EventEmitter {
   close(): void { try { this.stream.end(); } catch { /* already gone */ } }
 }
 
-// JVM cold start on IBM i can take a while, so give the first handshake room.
+// JVM cold start on IBM i can be slow, so give the first handshake room.
 const CONNECT_TIMEOUT_MS = 60000;
 
 function sftp(conn: Client): Promise<SFTPWrapper> {
   return new Promise((res, rej) => conn.sftp((e, s) => (e ? rej(e) : res(s))));
 }
 
-// Upload the bundled jar to $HOME/.ibm-i-source-mcp once. Size mismatch (or a
-// missing file) triggers a re-upload, so a newer bundled jar replaces an old one.
+// Upload the jar to $HOME/.ibm-i-source-mcp, replacing it only when the size
+// differs so a newer bundled jar takes over.
 async function ensureJar(conn: Client): Promise<string> {
   verifyBundledJar();
   const s = await sftp(conn);
@@ -110,9 +102,8 @@ async function ensureJar(conn: Client): Promise<string> {
   }
 }
 
-// Open an SSH connection, make sure the jar is present, spawn it in --single
-// mode, and hand back a connected mapepire SQLJob driving that stream. The SSH
-// Client is attached to the job so the caller can tear both down together.
+// Open SSH, ensure the jar, spawn it --single, and return a connected SQLJob
+// driving that stream. The SSH client is attached to the job for teardown.
 export async function connectSshMapepire(profile: Profile): Promise<Job> {
   const conn = new Client();
   const hostKey = `${profile.host}:${profile.sshPort}`;
@@ -130,7 +121,7 @@ export async function connectSshMapepire(profile: Profile): Promise<Job> {
             ? new Error(
                 `SSH host key for ${hostKey} does not match the trusted fingerprint.\n` +
                   `  expected: ${expected}\n  got:      ${presented}\n` +
-                  `This can mean the box changed, or a man-in-the-middle. If the change is expected, ` +
+                  `This can mean the box changed, or a man in the middle. If the change is expected, ` +
                   `update IBMI_HOST_FINGERPRINT or remove the entry from ${knownHostsPath()}.`,
               )
             : e,
@@ -142,8 +133,7 @@ export async function connectSshMapepire(profile: Profile): Promise<Job> {
         username: profile.user,
         password: profile.password,
         keepaliveInterval: 15000,
-        // Verify the host key ourselves (ssh2 does not by default). Pinned value
-        // wins; otherwise trust-on-first-use, recording the key for next time.
+        // Verify the host key ourselves (ssh2 does not). Pin wins, else trust on first use.
         hostVerifier: ((key: Buffer) => {
           presented = hostFp(key);
           if (expected) { mismatch = !fpEq(presented, expected); return !mismatch; }
@@ -160,12 +150,9 @@ export async function connectSshMapepire(profile: Profile): Promise<Job> {
 
   try {
     const jarPath = profile.mapepireJar ?? (await ensureJar(conn));
-    // Run the mapepire server in single mode, exactly the way Code for IBM i
-    // does. The four QIBM_* env vars turn off every PASE and Java stdio
-    // converter so our UTF-8 JSON reaches the server unmangled; without them
-    // PASE transcodes the pipe to the job CCSID and the server sees garbage.
-    // The env vars are inline VAR=value prefixes on purpose: IBM i sshd usually
-    // drops channel env vars (AcceptEnv), so they must be part of the command.
+    // Run the jar in single mode like Code for IBM i. The four QIBM_* vars turn
+    // off PASE and Java stdio conversion so our UTF-8 JSON is not mangled to the
+    // job CCSID. They are inline prefixes because IBM i sshd drops channel env vars.
     const cmd =
       `QIBM_JAVA_STDIO_CONVERT=N QIBM_PASE_DESCRIPTOR_STDIO=B QIBM_USE_DESCRIPTOR_STDIO=Y QIBM_MULTI_THREADED=Y ` +
       `java -Dos400.stdio.convert=N -jar ${jarPath} --single`;
@@ -175,13 +162,11 @@ export async function connectSshMapepire(profile: Profile): Promise<Job> {
 
     const socket = new StreamSocket(stream);
     const job = new SQLJob();
-    // socket/responseEmitter/status are private to SQLJob at the type level but
-    // plain fields at runtime; reach them through an untyped alias.
+    // socket/responseEmitter/status are private in TS but plain fields at runtime.
     const j = job as any;
     j.options.naming = profile.naming;
     j.socket = socket;
-    // Route every response line into the job's own emitter, keyed by message id,
-    // exactly the way mapepire-js's WebSocket channel does.
+    // Feed each response line into the job's emitter by id, like mapepire's channel.
     socket.on("message", (line: string) => {
       try {
         const m = JSON.parse(line);
@@ -190,19 +175,16 @@ export async function connectSshMapepire(profile: Profile): Promise<Job> {
         /* startup banner or non-JSON log line: ignore */
       }
     });
-    // If the jar never starts (bad java, missing jar), the exec stream closes
-    // before we get a response. Turn that into a clear rejection instead of a
-    // hang, and surface whatever the jar printed to stderr.
+    // If the jar never starts, the stream closes before a response. Reject with
+    // the stderr tail rather than hang.
     let closedEarly: (() => void) | undefined;
     const closedBeforeReady = new Promise<never>((_, rej) => {
       closedEarly = () => rej(new Error(`mapepire process exited before connecting${socket.stderr ? `: ${socket.stderr.trim()}` : ""}`));
       socket.once("close", closedEarly);
     });
 
-    // In --single mode the connection is implicitly the SSH user, so the connect
-    // message carries no host/user/password, only the JDBC options (naming, ...).
-    // technique is "tcp" to match Code for IBM i: its "cli" mode has known issues
-    // with DOVE and CCSID 65535 source, and tcp gives a normal QZDASOINIT job.
+    // Single mode connects as the SSH user, so no host/user/password, only JDBC
+    // options. technique "tcp" matches Code for IBM i (cli breaks on CCSID 65535).
     const props = Object.keys(j.options)
       .map((k) => `${k}=${j.options[k]}`)
       .join(";");

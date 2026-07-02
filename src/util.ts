@@ -2,10 +2,8 @@ import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { MemberRef } from "./types.js";
 
-// Local file extension = the member's source type, lowercased (rpgle -> .rpgle,
-// dspf -> .dspf, prtf -> .prtf, pf/lf -> .pf/.lf, ...). This is what Code for
-// IBM i does and it lets editors and language tooling pick the right handler.
-// A member with no type falls back to .txt.
+// Extension = the member's source type, lowercased (dspf, rpgle, pf, lf, ...),
+// like Code for IBM i, so editors pick the right handler. No type gives .txt.
 export function extFor(type: string): string {
   const t = type?.toLowerCase().trim();
   return t ? `.${t}` : ".txt";
@@ -15,11 +13,9 @@ export function textContains(haystack: string, needle: string, caseSensitive = f
   return caseSensitive ? haystack.includes(needle) : haystack.toLowerCase().includes(needle.toLowerCase());
 }
 
-// Write UTF-8 (no BOM) + CRLF. Also drops a pristine copy of exactly what was
-// fetched under a single .backup/ root that mirrors the lib/file/member tree
-// (baseDir/.backup/<lib>/<file>/<member>.<ext>), so the original is recoverable
-// if an edit goes wrong. The backup is refreshed on every read and never
-// touched by edits. Returns both paths.
+// Write UTF-8 (no BOM) with CRLF, plus a pristine backup under a single .backup/
+// root mirroring the tree (baseDir/.backup/<lib>/<file>/<member>.<ext>). The
+// backup refreshes on each read and edits never touch it, so it is a restore point.
 export function writeLocalCopy(baseDir: string, ref: MemberRef, type: string, content: string): { path: string; backup: string } {
   const name = ref.member + extFor(type);
   const crlf = content.replace(/\r?\n/g, "\r\n");
@@ -35,10 +31,10 @@ export function writeLocalCopy(baseDir: string, ref: MemberRef, type: string, co
   return { path, backup };
 }
 
-// Find the copy read_source_member wrote (any extension), for upload round-trips.
+// Find the copy read_source_member wrote (any extension), for upload round trips.
 export function findLocalCopy(baseDir: string, ref: MemberRef): string {
   const dir = join(baseDir, ref.library, ref.sourceFile);
   const hit = readdirSync(dir).find((f) => f.replace(/\.[^.]*$/, "") === ref.member);
-  if (!hit) throw new Error(`no local copy in ${dir} for ${ref.member} — read it first, or pass localPath/content`);
+  if (!hit) throw new Error(`no local copy in ${dir} for ${ref.member}, read it first or pass localPath/content`);
   return join(dir, hit);
 }

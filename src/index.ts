@@ -8,19 +8,17 @@ import { MapepireBackend } from "./mapepire.js";
 import { findLocalCopy, writeLocalCopy } from "./util.js";
 import type { SourceBackend } from "./types.js";
 
-// stdout is the JSON-RPC channel — keep it pristine. Route any console.log
-// (incl. from deps like mapepire-js, which logs socket errors) to stderr, and
-// never let a stray async error crash the transport mid-session.
+// stdout is the JSON-RPC channel, keep it clean: route console.log (including
+// from deps) to stderr, and do not let a stray async error kill the transport.
 console.log = (...a: unknown[]) => console.error(...a);
 process.on("unhandledRejection", (r) => console.error("[ibm-i-source] unhandledRejection:", r));
 process.on("uncaughtException", (e) => console.error("[ibm-i-source] uncaughtException:", e));
 
 const LOCAL_DIR = process.env.IBMI_LOCAL_DIR || "ibmi-src";
 
-// One backend per server, cached so switching between boxes reuses the open
-// session. Config is loaded lazily so the server still starts (and lists its
-// tools) when no env file is present; a missing/invalid config then surfaces as
-// a clean tool error rather than a startup crash. "default" is the .env server.
+// One cached backend per server, so switching boxes reuses the open session.
+// Config loads lazily, so the server still starts and lists its tools with no
+// env file, and a bad config surfaces as a tool error, not a startup crash.
 const backends = new Map<string, SourceBackend>();
 async function getBackend(server?: string): Promise<SourceBackend> {
   const key = server?.toLowerCase() || "default";
@@ -33,7 +31,7 @@ async function getBackend(server?: string): Promise<SourceBackend> {
 }
 
 // Reused by every tool: an optional server name selecting a .env.<name> file.
-const serverArg = z.string().optional().describe("which IBM i to use, named by a .env.<name> file; omit for the default .env server (see list_servers)");
+const serverArg = z.string().optional().describe("which IBM i to use, named by a .env.<name> file. Omit for the default .env server (see list_servers)");
 
 const server = new McpServer({ name: "ibm-i-source", version: "0.1.0" });
 
@@ -69,7 +67,7 @@ server.tool(
   "Discovery search across a library: a member matches if the term is in its NAME, its TEXT description, or its code. Great for finding a member by its purpose (e.g. a Dutch word like 'afdeling'). Scope with sourceFile to keep it fast.",
   {
     library: z.string().describe("library to search"),
-    searchTerm: z.string().describe("literal string to find (not a regex) — try a purpose word, e.g. afdeling"),
+    searchTerm: z.string().describe("literal string to find (not a regex), try a purpose word, e.g. afdeling"),
     sourceFile: z.string().optional().describe("limit to one source file, e.g. QDDSSRC"),
     memberType: z.string().optional().describe("limit to a member type, e.g. DSPF, RPGLE"),
     caseSensitive: z.boolean().optional().describe("default false"),
@@ -84,7 +82,7 @@ server.tool(
         const loc = `${m.library}/${m.sourceFile}(${m.member})${m.type ? ` [${m.type}]` : ""}`;
         if (m.matchedOn === "code") return `${loc} code:${m.seqNbr}: ${m.line}`;
         if (m.matchedOn === "text") return `${loc} text: "${m.text}"`;
-        if (m.matchedOn === "name") return `${loc} name${m.text ? ` — "${m.text}"` : ""}`;
+        if (m.matchedOn === "name") return `${loc} name${m.text ? `: "${m.text}"` : ""}`;
         return `${loc}: ${m.line ?? ""}`;
       });
       const head = `${matches.length} match(es)${truncated ? ` (truncated at maxResults)` : ""}\n\n`;
@@ -103,7 +101,7 @@ server.tool(
     try {
       const be = await getBackend(server);
       const files = await be.listSourceFiles(library);
-      const lines = files.map((f) => `${f.name}${f.text ? `  — ${f.text}` : ""}`);
+      const lines = files.map((f) => `${f.name}${f.text ? `: ${f.text}` : ""}`);
       return { content: [{ type: "text", text: `${files.length} source file(s) in ${library}:\n\n` + (lines.join("\n") || "(none)") }] };
     } catch (e: any) {
       return { isError: true, content: [{ type: "text", text: `list_source_files failed: ${e.message}` }] };
@@ -124,7 +122,7 @@ server.tool(
     try {
       const be = await getBackend(server);
       const members = await be.listMembers(library, sourceFile, memberType);
-      const lines = members.map((m) => `${m.sourceFile}(${m.name}) [${m.type || "?"}]${m.text ? `  — ${m.text}` : ""}`);
+      const lines = members.map((m) => `${m.sourceFile}(${m.name}) [${m.type || "?"}]${m.text ? `: ${m.text}` : ""}`);
       return { content: [{ type: "text", text: `${members.length} member(s) in ${library}${sourceFile ? `/${sourceFile}` : ""}:\n\n` + (lines.join("\n") || "(none)") }] };
     } catch (e: any) {
       return { isError: true, content: [{ type: "text", text: `list_members failed: ${e.message}` }] };

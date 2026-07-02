@@ -4,15 +4,12 @@ import { fileURLToPath } from "node:url";
 import { config as loadEnv, parse } from "dotenv";
 import type { Profile } from "./types.js";
 
-// Config lives in env files. We look in the folder the server is launched from,
-// then in the server's own install folder as a fallback. This keeps config in
-// a file for every install method, whether run from source or via npx with a
-// chosen working directory.
+// Env files are looked for in the launch folder, then the install folder, so it
+// works run from source or via npx with a chosen working directory.
 const CONFIG_DIRS = [process.cwd(), join(dirname(fileURLToPath(import.meta.url)), "..")];
 
-// The default server comes from .env, loaded into process.env. dotenv never
-// overrides an already-set variable, so a real environment variable (or the
-// first file found) wins.
+// The default server is .env, loaded into process.env. dotenv never overrides an
+// already set variable, so a real env var (or the first file found) wins.
 for (const d of CONFIG_DIRS) loadEnv({ path: join(d, ".env") });
 
 // Additional servers live in .env.<name> files (one per box). The filename is

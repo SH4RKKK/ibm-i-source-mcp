@@ -21,9 +21,8 @@ function validLibOrStar(v: string, what: string): string {
 type Row = Record<string, any>;
 const randOver = () => "O" + Math.random().toString(36).slice(2, 11).toUpperCase();
 
-// We fetch a query in a single block rather than paging. This cap is far past
-// any real source member or member list, so hitting it means something is off,
-// and we error instead of silently returning a truncated result.
+// Single block fetch, no paging. Far past any real member or list, so hitting
+// it means something is off and we error rather than truncate.
 const MAX_ROWS = 100_000;
 
 export class MapepireBackend implements SourceBackend {
@@ -35,19 +34,16 @@ export class MapepireBackend implements SourceBackend {
 
   constructor(private profile: Profile) {}
 
-  // Single job, serialized: ovrdbf is *job-scoped, so its select/dltovr must
-  // run on the same job with nothing interleaved.
-  // ponytail: one job + mutex. Add a pool only if concurrent reads ever matter.
+  // One serialized job: ovrdbf is job scoped, so its select and dltovr must run
+  // on the same job uninterleaved. Add a pool only if it ever matters.
   private serialize<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.chain.then(fn, fn);
     this.chain = run.then(() => {}, () => {});
     return run;
   }
 
-  // Connect the same way Code for IBM i does: SSH in and run the mapepire jar in
-  // --single mode, speaking its JSON protocol over the exec channel. No daemon,
-  // no open port. The SQLJob and its query engine are unchanged, only the socket
-  // underneath it is an SSH stream instead of a WebSocket (see sshMapepire.ts).
+  // SSH in and run the jar in --single mode (see sshMapepire.ts). The SQLJob and
+  // its query engine are unchanged, only the socket under it is an SSH stream.
   private async connect(): Promise<InstanceType<typeof SQLJob>> {
     if (this.job) return this.job;
     this.job = await connectSshMapepire(this.profile);
@@ -62,7 +58,7 @@ export class MapepireBackend implements SourceBackend {
     // No paging: if the server says it is not done, there were more than MAX_ROWS
     // rows. Fail loudly rather than hand back a truncated member or member list.
     if (rs.has_results && rs.is_done === false) {
-      throw new Error(`result exceeded ${MAX_ROWS} rows and would be truncated — narrow the request`);
+      throw new Error(`result exceeded ${MAX_ROWS} rows and would be truncated, narrow the request`);
     }
     return rs.has_results ? (rs.data as Row[]) : [];
   }
@@ -93,8 +89,7 @@ export class MapepireBackend implements SourceBackend {
         ))[0];
         const ccsid = Number(col?.CCSID ?? this.profile.sourceFileCcsid);
         const len = Number(col?.LENGTH ?? 80);
-        // ponytail: 65535 (no-conversion) -> cast to profile.sourceFileCcsid (default 37).
-        // Bump sourceFileCcsid per profile if a box stores source in another EBCDIC page.
+        // ccsid 65535 means no conversion, so cast to sourceFileCcsid (default 37).
         const srcdta = ccsid === 65535 ? `cast(srcdta as varchar(${len}) ccsid ${this.profile.sourceFileCcsid}) as srcdta` : "srcdta";
         const rows = await this.sql(`select ${srcdta} from ${over}`);
         const content = rows.map((r) => r.SRCDTA ?? "").join("\n");
@@ -124,10 +119,9 @@ export class MapepireBackend implements SourceBackend {
     }
   }
 
-  // Enumerate source members (name/type/text) via object_statistics + a lateral
-  // partition_statistics call — same shape Code for IBM i's getMemberList uses.
-  // source_type is not null keeps it to real source members (skips data-PF rows,
-  // which also have no SRCDTA to scan).
+  // Source members via object_statistics + a lateral partition_statistics call,
+  // like Code for IBM i's getMemberList. source_type not null keeps it to real
+  // source members (data PF rows have no SRCDTA to scan).
   private async enumerateMembers(lib: string, srcf?: string, type?: string): Promise<Row[]> {
     const objName = srcf ?? "*ALL";
     return this.sql(
@@ -160,9 +154,9 @@ export class MapepireBackend implements SourceBackend {
     return rows.map((r) => ({ sourceFile: r.SOURCE_FILE, name: r.NAME, type: (r.TYPE || "").toLowerCase(), text: r.TEXT || "", lines: Number(r.LINES) || undefined }));
   }
 
-  // Discovery search: a member surfaces if the term is in its NAME, its TEXT
-  // description, or its code. Name/text hits let a plain-language purpose match
-  // even when the word never appears in the source.
+  // Discovery search: a member surfaces if the term is in its name, its text
+  // description, or its code, so a purpose word can match even when it never
+  // appears in the source itself.
   async searchSource(opts: SearchOpts): Promise<SearchResult> {
     const lib = validName(opts.library, "library");
     const srcf = opts.sourceFile ? validName(opts.sourceFile, "sourceFile") : undefined;
