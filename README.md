@@ -1,5 +1,13 @@
 # ibm-i-source-mcp
 
+[![npm](https://img.shields.io/npm/v/ibm-i-source-mcp?logo=npm&color=cb3837)](https://www.npmjs.com/package/ibm-i-source-mcp)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![node](https://img.shields.io/badge/node-%3E%3D18-3c873a?logo=node.js&logoColor=white)](package.json)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178c6?logo=typescript&logoColor=white)](package.json)
+[![MCP SDK](https://img.shields.io/badge/MCP%20SDK-%5E1.19-6f42c1)](https://github.com/modelcontextprotocol/typescript-sdk)
+[![IBM i](https://img.shields.io/badge/IBM%20i-Db2%20for%20i-052fad?logo=ibm&logoColor=white)](https://mapepire-ibmi.github.io/)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/SH4RKKK/ibm-i-source-mcp)
+
 An [MCP](https://modelcontextprotocol.io) server that lets AI tools like Claude Code work directly
 with the source members on an IBM i, the RPG, SQLRPGLE, CLLE, and DDS that live on the box. You can
 find code by describing what it does, read it as clean UTF-8, edit it locally, then send it back and
