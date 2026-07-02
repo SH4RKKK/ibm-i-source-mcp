@@ -43,16 +43,16 @@ export function buildCompileCommand(type: string | undefined, v: CompileVars, ov
 // Compiling means creating an object, so the compile command should be a crt*
 // command. The `command` override is a real escape hatch (it runs as CL as the
 // connected profile), so we guard it: block anything that is not a crt* verb,
-// plus an explicit denylist of destructive verbs, plus any extra verbs the
-// admin lists in IBMI_BLOCKED_CL. This is a safety net, not the primary control
-// — the connecting profile's object authority is. The leading verb is what CL
-// runs (a single command via QCMDEXC cannot chain another), so checking it is
-// enough.
+// plus destructive verbs, plus any extra verbs the admin lists in
+// IBMI_BLOCKED_CL. This is a safety net, not the primary control, the connecting
+// profile's object authority is. The leading verb is what CL runs (a single
+// command via QCMDEXC cannot chain another), so checking it is enough.
+// Whole families are blocked by prefix: any dlt*, clr*, or rmv* command.
+const DESTRUCTIVE_PREFIXES = ["dlt", "clr", "rmv"];
 const DESTRUCTIVE_CL = new Set([
-  "dltlib", "clrlib", "dltf", "dltobj", "dltpgm", "dltmod", "clrpfm", "rmvm", "rgzpfm",
-  "savlib", "savobj", "rstlib", "rstobj", "dltusrprf", "crtusrprf", "chgusrprf",
+  "rgzpfm", "savlib", "savobj", "rstlib", "rstobj", "crtusrprf", "chgusrprf",
   "grtobjaut", "rvkobjaut", "chgobjown", "pwrdwnsys", "endsbs", "endsys", "endtcp",
-  "sbmjob", "call", "qsh", "strqsh", "rundsql", "runsql",
+  "sbmjob", "call", "qsh", "strqsh", "strsql", "rundsql", "runsql", "runqry",
 ]);
 
 // The command verb, un-qualified (lib/cmd -> cmd), lowercased.
@@ -62,14 +62,18 @@ function verbOf(command: string): string {
   return bare.toLowerCase();
 }
 
+function isDestructive(verb: string, extraBlocked: string[]): boolean {
+  return DESTRUCTIVE_PREFIXES.some((p) => verb.startsWith(p)) || DESTRUCTIVE_CL.has(verb) || extraBlocked.includes(verb);
+}
+
 export function assertCompileCommandAllowed(command: string, extraBlocked: string[] = []): void {
   const verb = verbOf(command);
   if (!verb) throw new Error("empty compile command");
-  if (DESTRUCTIVE_CL.has(verb) || extraBlocked.includes(verb)) {
+  if (isDestructive(verb, extraBlocked)) {
     throw new Error(`refusing to run destructive CL command "${verb}" as a compile command`);
   }
   if (!verb.startsWith("crt") && verb !== "runsqlstm") {
-    throw new Error(`compile command "${verb}" is not a create (crt*) command — pass a crt* command, or use a CL tool if you need something else`);
+    throw new Error(`compile command "${verb}" is not a create (crt*) command, pass a crt* command or use a CL tool if you need something else`);
   }
 }
 

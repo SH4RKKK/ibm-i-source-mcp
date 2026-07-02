@@ -33,13 +33,20 @@ test("loadProfile parses safety options", () => {
   assert.deepEqual(p.blockedCl, ["crtpf", "dltf"]);
 });
 
-test("assertCompileCommandAllowed permits crt*, blocks destructive and non-create verbs", () => {
+test("assertCompileCommandAllowed permits crt*/runsqlstm, blocks destructive and non-create verbs", () => {
   assert.doesNotThrow(() => assertCompileCommandAllowed("crtdspf file(L/N) srcfile(L/F) srcmbr(M)"));
   assert.doesNotThrow(() => assertCompileCommandAllowed("crtbndrpg pgm(MYLIB/MYPGM)"));
+  assert.doesNotThrow(() => assertCompileCommandAllowed("runsqlstm srcfile(L/F) srcmbr(M)"));
+  // dlt* / clr* / rmv* families, matched by prefix
   assert.throws(() => assertCompileCommandAllowed("dltlib mylib"), /destructive/);
-  assert.throws(() => assertCompileCommandAllowed("clrpfm file(l/f)"), /destructive/);
+  assert.throws(() => assertCompileCommandAllowed("clrlib mylib"), /destructive/);
+  assert.throws(() => assertCompileCommandAllowed("rmvm file(l/f) mbr(m)"), /destructive/);
   assert.throws(() => assertCompileCommandAllowed("qsys/dltf file(l/f)"), /destructive/); // lib-qualified
-  assert.throws(() => assertCompileCommandAllowed("dsplib mylib"), /not a create/); // not crt*
+  // explicit verbs, including strsql and runqry
+  assert.throws(() => assertCompileCommandAllowed("strsql"), /destructive/);
+  assert.throws(() => assertCompileCommandAllowed("runqry qryfile(l/f)"), /destructive/);
+  assert.throws(() => assertCompileCommandAllowed("call pgm(l/p)"), /destructive/);
+  assert.throws(() => assertCompileCommandAllowed("dsplib mylib"), /not a create/); // not crt*, not destructive
   assert.throws(() => assertCompileCommandAllowed("crtpf file(l/f)", ["crtpf"]), /destructive/); // admin extra
 });
 
