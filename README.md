@@ -6,7 +6,6 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178c6?logo=typescript&logoColor=white)](package.json)
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-%5E1.19-6f42c1)](https://github.com/modelcontextprotocol/typescript-sdk)
 [![IBM i](https://img.shields.io/badge/IBM%20i-Db2%20for%20i-052fad?logo=ibm&logoColor=white)](https://mapepire-ibmi.github.io/)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/SH4RKKK/ibm-i-source-mcp)
 
 An [MCP](https://modelcontextprotocol.io) server that lets AI tools like Claude Code work directly
 with the source members on an IBM i, the RPG, SQLRPGLE, CLLE, and DDS that live on the box. You can
