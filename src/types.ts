@@ -58,6 +58,11 @@ export interface SourceFileInfo {
   text: string;
 }
 
+export interface LibraryInfo {
+  name: string;
+  text: string;
+}
+
 export interface SearchResult {
   matches: SearchMatch[];
   truncated: boolean;
@@ -93,6 +98,7 @@ export interface SourceBackend {
   transport: "mapepire";
   readMember(ref: MemberRef): Promise<{ content: string; meta: MemberMeta }>;
   searchSource(opts: SearchOpts): Promise<SearchResult>;
+  listLibraries(filter?: string, includeSystem?: boolean): Promise<LibraryInfo[]>;
   listSourceFiles(library: string): Promise<SourceFileInfo[]>;
   listMembers(library: string, sourceFile?: string, memberType?: string): Promise<MemberInfo[]>;
   writeMember(ref: MemberRef, content: string): Promise<{ warnings: string[] }>;

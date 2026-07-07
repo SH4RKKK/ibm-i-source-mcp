@@ -137,6 +137,23 @@ export class MapepireBackend implements SourceBackend {
     );
   }
 
+  // List libraries via object_statistics. The scope value *ALLUSR returns user
+  // libraries (where source lives), *ALL adds the IBM Q* system libraries. An
+  // optional filter narrows by a substring of the name or description, so an
+  // agent can home in on where source lives without dumping the whole system.
+  async listLibraries(filter?: string, includeSystem = false): Promise<{ name: string; text: string }[]> {
+    const scope = includeSystem ? "*ALL" : "*ALLUSR";
+    const f = filter?.trim();
+    const like = f ? f.replace(/'/g, "''").toUpperCase() : undefined; // for the LIKE literal
+    const where = like ? `where upper(objname) like '%${like}%' or upper(objtext) like '%${like}%'` : "";
+    const rows = await this.sql(
+      `select rtrim(objname) as name, coalesce(rtrim(objtext), '') as text
+       from table(qsys2.object_statistics('${scope}', '*LIB')) ${where}
+       order by name`,
+    );
+    return rows.map((r) => ({ name: r.NAME, text: r.TEXT }));
+  }
+
   async listSourceFiles(library: string): Promise<{ name: string; text: string }[]> {
     const lib = validName(library, "library");
     const rows = await this.sql(

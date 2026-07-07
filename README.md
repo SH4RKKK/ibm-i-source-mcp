@@ -119,6 +119,7 @@ All `.env` and `.env.*` files are git-ignored, only `.env.example` is committed.
 
 ### Discover
 
+- **`list_libraries`**: lists the libraries on the box with their text descriptions, so an assistant can find where source lives on its own instead of being told a library name. It returns user libraries by default. Pass `filter` to narrow by a substring of the name or the description, for example a project or application name, and `includeSystem` to also list the IBM `Q*` system libraries.
 - **`list_source_files`**: give it a library and it returns the source physical files (like `QRPGLESRC` or `QDDSSRC`) with their text descriptions.
 - **`list_members`**: give it a library, and optionally a `sourceFile` or `memberType`, and it lists every member with its name, type, and text description, the way you would browse in PDM or RDi.
 - **`search_source`**: give it a library and a `searchTerm`. A member turns up if the term is in its name, its text description, or its code, and each result tells you which. This lets you find a member by its purpose, for example a Dutch word like `afdeling`, even when that word never appears in the source itself.
@@ -137,11 +138,12 @@ All `.env` and `.env.*` files are git-ignored, only `.env.example` is committed.
 
 Say you ask: "find the display file that shows department information, and note the app is in Dutch."
 
-1. `search_source(library, "afdeling", memberType: "DSPF")` turns up the DDS member whose text description reads "Onderhoud afdelingsgegevens".
-2. `read_source_member(...)` brings the DDS down locally as UTF-8 so the assistant can read it.
-3. You edit the local copy, by hand or with the assistant's help.
-4. `upload_source_member(...)` sends the change back into the member.
-5. `compile_member(..., targetLibrary: "DEVLIB")` reports SUCCESS, or FAILED with the listing and the exact message IDs and line numbers to fix.
+1. `list_libraries(filter: "adm")` finds the candidate libraries when you do not already know the name, so the assistant can pick where to look on its own.
+2. `search_source(library, "afdeling", memberType: "DSPF")` turns up the DDS member whose text description reads "Onderhoud afdelingsgegevens".
+3. `read_source_member(...)` brings the DDS down locally as UTF-8 so the assistant can read it.
+4. You edit the local copy, by hand or with the assistant's help.
+5. `upload_source_member(...)` sends the change back into the member.
+6. `compile_member(..., targetLibrary: "DEVLIB")` reports SUCCESS, or FAILED with the listing and the exact message IDs and line numbers to fix.
 
 ## How it works
 

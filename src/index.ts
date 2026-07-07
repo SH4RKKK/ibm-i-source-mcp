@@ -94,6 +94,27 @@ server.tool(
 );
 
 server.tool(
+  "list_libraries",
+  "List libraries (schemas) on the IBM i with their text descriptions, so you can discover where source lives before drilling in with list_source_files and list_members. Lists user libraries by default. Pass filter to narrow by a substring of the library name or its description, e.g. a project or application name.",
+  {
+    filter: z.string().optional().describe("substring to match against the library name or its text, case-insensitive. Omit to list all user libraries."),
+    includeSystem: z.boolean().optional().describe("also include the IBM Q* system libraries (default false, user libraries only)"),
+    server: serverArg,
+  },
+  async ({ filter, includeSystem, server }) => {
+    try {
+      const be = await getBackend(server);
+      const libs = await be.listLibraries(filter, includeSystem);
+      const lines = libs.map((l) => `${l.name}${l.text ? `: ${l.text}` : ""}`);
+      const head = `${libs.length} librar${libs.length === 1 ? "y" : "ies"}${filter ? ` matching "${filter}"` : ""}:\n\n`;
+      return { content: [{ type: "text", text: head + (lines.join("\n") || "(none)") }] };
+    } catch (e: any) {
+      return { isError: true, content: [{ type: "text", text: `list_libraries failed: ${e.message}` }] };
+    }
+  },
+);
+
+server.tool(
   "list_source_files",
   "List the source physical files in a library (e.g. QRPGLESRC, QDDSSRC) with their text descriptions. Use to explore where source lives before listing members.",
   { library: z.string(), server: serverArg },
