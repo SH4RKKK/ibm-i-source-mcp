@@ -1,6 +1,6 @@
 import mapepire from "@ibm/mapepire-js";
-import type { CompileError, CompileOpts, CompileResult, MemberMeta, MemberRef, Profile, SearchMatch, SearchOpts, SearchResult, SourceBackend } from "./types.js";
-import { assertCompileCommandAllowed, buildCompileCommand, parseEvfevent } from "./compile.js";
+import type { CompileError, CompileOpts, CompileResult, LibraryListAction, LibraryListChange, LibraryListEntry, MemberMeta, MemberRef, Profile, SearchMatch, SearchOpts, SearchResult, SourceBackend } from "./types.js";
+import { assertCompileCommandAllowed, buildCompileCommand, buildLibraryListCommands, parseEvfevent } from "./compile.js";
 import { textContains } from "./util.js";
 import { closeSshMapepire, connectSshMapepire } from "./sshMapepire.js";
 
@@ -152,6 +152,38 @@ export class MapepireBackend implements SourceBackend {
        order by name`,
     );
     return rows.map((r) => ({ name: r.NAME, text: r.TEXT }));
+  }
+
+  // The connection's library list (SYSTEM / PRODUCT / CURRENT / USER portions),
+  // in search order. Read-only, so no serialize needed.
+  async readLibraryList(): Promise<LibraryListEntry[]> {
+    const rows = await this.sql(
+      `select type, rtrim(system_schema_name) as lib from qsys2.library_list_info order by ordinal_position`,
+    );
+    return rows.map((r) => ({ portion: String(r.TYPE), library: r.LIB }));
+  }
+
+  // Change the job's library list for this session: addlible / rmvlible /
+  // chgcurlib / chglibl. Session scoped and non-destructive (it never touches
+  // objects), but it does affect later compiles, so it runs on the serialized job.
+  // Names go through validName first, the trust boundary. Returns the new list.
+  async changeLibraryList(action: LibraryListAction, change: LibraryListChange): Promise<LibraryListEntry[]> {
+    const args: LibraryListChange = { position: change.position };
+    if (action === "add" || action === "remove" || action === "set_current") {
+      if (!change.library) throw new Error(`library-list action "${action}" needs a library`);
+      args.library = validName(change.library, "library");
+    } else {
+      args.libraries = (change.libraries ?? []).map((l) => validName(l, "library"));
+      if (change.currentLibrary) args.currentLibrary = validName(change.currentLibrary, "currentLibrary");
+    }
+    const cmds = buildLibraryListCommands(action, args);
+    return this.serialize(async () => {
+      for (const c of cmds) {
+        const r = await this.clResult(c);
+        if (r?.success === false) throw new Error(`${c} failed: ${r.error || r.sql_state || "unknown error"}`);
+      }
+      return this.readLibraryList();
+    });
   }
 
   async listSourceFiles(library: string): Promise<{ name: string; text: string }[]> {

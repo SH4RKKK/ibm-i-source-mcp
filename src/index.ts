@@ -115,6 +115,32 @@ server.tool(
 );
 
 server.tool(
+  "manage_library_list",
+  "View or change the connection's library list. `show` returns the current list (SYSTEM/PRODUCT/CURRENT/USER portions). `add` and `remove` add or drop one library (ADDLIBLE/RMVLIBLE), `set_current` sets the current library (CHGCURLIB), and `replace` sets the whole user portion (CHGLIBL). Changes last for the session and are used by later compiles, like adding a library on the green screen. It only changes the job's library list, never objects or data. Use this when a compile needs a library that is not on the sign-on list.",
+  {
+    action: z.enum(["show", "add", "remove", "set_current", "replace"]).describe("show the list, add/remove one library, set the current library, or replace the whole user portion"),
+    library: z.string().optional().describe("the library for add, remove, or set_current"),
+    libraries: z.array(z.string()).optional().describe("the full user library list for replace, in search order (first = highest priority)"),
+    position: z.enum(["first", "last"]).optional().describe("for add: put it first (searched first) or last (default)"),
+    currentLibrary: z.string().optional().describe("for replace: also set the current library"),
+    server: serverArg,
+  },
+  async ({ action, library, libraries, position, currentLibrary, server }) => {
+    try {
+      const be = await getBackend(server);
+      const entries = action === "show"
+        ? await be.readLibraryList()
+        : await be.changeLibraryList(action, { library, libraries, position, currentLibrary });
+      const body = entries.map((e) => `  ${e.portion.padEnd(8)} ${e.library}`).join("\n");
+      const head = action === "show" ? "Library list:" : `Done (${action}). Library list now:`;
+      return { content: [{ type: "text", text: `${head}\n\n${body || "(empty)"}` }] };
+    } catch (e: any) {
+      return { isError: true, content: [{ type: "text", text: `manage_library_list failed: ${e.message}` }] };
+    }
+  },
+);
+
+server.tool(
   "list_source_files",
   "List the source physical files in a library (e.g. QRPGLESRC, QDDSSRC) with their text descriptions. Use to explore where source lives before listing members.",
   { library: z.string(), server: serverArg },

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { extFor, textContains } from "./util.js";
 import { loadProfile } from "./config.js";
-import { assertCompileCommandAllowed, buildCompileCommand, parseEvfevent } from "./compile.js";
+import { assertCompileCommandAllowed, buildCompileCommand, buildLibraryListCommands, parseEvfevent } from "./compile.js";
 
 test("extFor uses the member type as the extension", () => {
   assert.equal(extFor("SQLRPGLE"), ".sqlrpgle");
@@ -86,4 +86,14 @@ test("parseEvfevent also handles an ERROR record with no severity-class letter",
   assert.equal(errs[0].severity, 20);
   assert.equal(errs[0].line, 17);
   assert.equal(errs[0].text, "Keyword not valid for this file type.");
+});
+
+test("buildLibraryListCommands builds the right CL per action", () => {
+  assert.deepEqual(buildLibraryListCommands("add", { library: "MYLIB" }), ["addlible lib(MYLIB) position(*last)"]);
+  assert.deepEqual(buildLibraryListCommands("add", { library: "MYLIB", position: "first" }), ["addlible lib(MYLIB) position(*first)"]);
+  assert.deepEqual(buildLibraryListCommands("remove", { library: "MYLIB" }), ["rmvlible lib(MYLIB)"]);
+  assert.deepEqual(buildLibraryListCommands("set_current", { library: "MYLIB" }), ["chgcurlib curlib(MYLIB)"]);
+  // replace drops QTEMP (implicit) and can set the current library
+  assert.deepEqual(buildLibraryListCommands("replace", { libraries: ["A", "QTEMP", "B"], currentLibrary: "C" }), ["chglibl libl(A B) curlib(C)"]);
+  assert.deepEqual(buildLibraryListCommands("replace", { libraries: [] }), ["chglibl libl(*none)"]);
 });

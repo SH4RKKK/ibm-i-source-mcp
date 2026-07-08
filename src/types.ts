@@ -63,6 +63,20 @@ export interface LibraryInfo {
   text: string;
 }
 
+export type LibraryListAction = "add" | "remove" | "set_current" | "replace";
+
+export interface LibraryListChange {
+  library?: string;              // add / remove / set_current
+  libraries?: string[];          // replace: the full user portion, in search order
+  position?: "first" | "last";   // add: default last
+  currentLibrary?: string;       // replace: also set the current library
+}
+
+export interface LibraryListEntry {
+  portion: string;               // SYSTEM | PRODUCT | CURRENT | USER
+  library: string;
+}
+
 export interface SearchResult {
   matches: SearchMatch[];
   truncated: boolean;
@@ -99,6 +113,8 @@ export interface SourceBackend {
   readMember(ref: MemberRef): Promise<{ content: string; meta: MemberMeta }>;
   searchSource(opts: SearchOpts): Promise<SearchResult>;
   listLibraries(filter?: string, includeSystem?: boolean): Promise<LibraryInfo[]>;
+  readLibraryList(): Promise<LibraryListEntry[]>;
+  changeLibraryList(action: LibraryListAction, change: LibraryListChange): Promise<LibraryListEntry[]>;
   listSourceFiles(library: string): Promise<SourceFileInfo[]>;
   listMembers(library: string, sourceFile?: string, memberType?: string): Promise<MemberInfo[]>;
   writeMember(ref: MemberRef, content: string): Promise<{ warnings: string[] }>;

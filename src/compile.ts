@@ -1,4 +1,24 @@
-import type { CompileError } from "./types.js";
+import type { CompileError, LibraryListAction, LibraryListChange } from "./types.js";
+
+// Build the CL for a library-list change. Names are validated and upper-cased by
+// the caller (the trust boundary), so they splice in directly. Lowercase verbs
+// and keywords, house style. QTEMP is always in the list implicitly and cannot
+// be set with chglibl, so it is dropped from a replace.
+export function buildLibraryListCommands(action: LibraryListAction, a: LibraryListChange): string[] {
+  switch (action) {
+    case "add":
+      return [`addlible lib(${a.library}) position(*${a.position ?? "last"})`];
+    case "remove":
+      return [`rmvlible lib(${a.library})`];
+    case "set_current":
+      return [`chgcurlib curlib(${a.library})`];
+    case "replace": {
+      const libs = (a.libraries ?? []).filter((l) => l !== "QTEMP");
+      const cur = a.currentLibrary ? ` curlib(${a.currentLibrary})` : "";
+      return [`chglibl libl(${libs.length ? libs.join(" ") : "*none"})${cur}`];
+    }
+  }
+}
 
 // Member-compile CL per source type (lowercased, house style). All ILE types
 // carry option(*eventf) so the compiler writes an EVFEVENT error file.

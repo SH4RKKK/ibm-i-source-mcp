@@ -129,10 +129,14 @@ All `.env` and `.env.*` files are git-ignored, only `.env.example` is committed.
 
 - **`read_source_member`**: give it a library, source file, and member. It returns the source as clean UTF-8 and saves an editable local copy at `ibmi-src/<lib>/<file>/<member>.<ext>`, where the extension is the member type (a display file becomes `.dspf`, an RPGLE program `.rpgle`, and so on). It also saves an untouched backup under a single backup root that mirrors the tree, `ibmi-src/.backup/<lib>/<file>/<member>.<ext>`, refreshed on every read, so you can always get the original back if an edit goes wrong. It returns metadata too: type, ccsid, line count, and last changed date.
 
+### Library list
+
+- **`manage_library_list`**: view or change the connection's library list. `action: show` returns the current list (the SYSTEM, PRODUCT, CURRENT, and USER portions). `action: add` and `remove` add or drop one library (`ADDLIBLE` / `RMVLIBLE`), `set_current` sets the current library (`CHGCURLIB`), and `replace` sets the whole user portion at once (`CHGLIBL`). The connection uses one job for the whole session, so a change stays in effect and later compiles use it, just like adding a library on the green screen. It only ever changes the job's library list, never objects or data. Use it when a compile needs a library that is not on the sign-on list. The library list otherwise comes from the connecting profile, so administrators can set the everyday list on the account.
+
 ### Change
 
 - **`upload_source_member`**: give it a library, source file, and member, and optionally a `localPath` or `content`. It writes the edited copy back into the member, defaulting to the local copy that `read_source_member` saved. If a line is longer than the source record length, it tells you the line was truncated.
-- **`compile_member`**: give it a library, source file, and member, and optionally `targetLibrary` (defaults to `*curlib`), `objectName`, `command`, or `type`. It compiles the member and returns whether it succeeded, the compiler spool listing, and the structured errors parsed from the EVFEVENT event file. It picks a `crt` command based on the source type, and you can override that with `command`. Pass a real `targetLibrary` if you want the structured errors.
+- **`compile_member`**: give it a library, source file, and member, and optionally `targetLibrary` (defaults to `*curlib`), `objectName`, `command`, or `type`. It compiles the member and returns whether it succeeded, the compiler spool listing, and the structured errors parsed from the EVFEVENT event file. It picks a `crt` command based on the source type, and you can override that with `command`. Pass a real `targetLibrary` if you want the structured errors. On a box with no current library, `*curlib` falls back to QGPL, so pass `targetLibrary` when the object must land somewhere specific.
 
 ## Example workflow
 
