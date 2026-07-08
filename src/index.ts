@@ -116,7 +116,7 @@ server.tool(
 
 server.tool(
   "manage_library_list",
-  "View or change the connection's library list. `show` returns the current list (SYSTEM/PRODUCT/CURRENT/USER portions). `add` and `remove` add or drop one library (ADDLIBLE/RMVLIBLE), `set_current` sets the current library (CHGCURLIB), and `replace` sets the whole user portion (CHGLIBL). Changes last for the session and are used by later compiles, like adding a library on the green screen. It only changes the job's library list, never objects or data. Use this when a compile needs a library that is not on the sign-on list.",
+  "View or change the connection's library list. `show` returns the current list (SYSTEM/PRODUCT/CURRENT/USER portions). `add` and `remove` add or drop one library (ADDLIBLE/RMVLIBLE), `set_current` sets the current library (CHGCURLIB), and `replace` sets the whole user portion (CHGLIBL). Changes last for the session and are used by later compiles, like adding a library on the green screen. It only changes the job's library list, never objects or data. Use this when a compile needs a library that is not on the sign-on list. The change actions are disabled when IBMI_READ_ONLY is set; `show` always works.",
   {
     action: z.enum(["show", "add", "remove", "set_current", "replace"]).describe("show the list, add/remove one library, set the current library, or replace the whole user portion"),
     library: z.string().optional().describe("the library for add, remove, or set_current"),

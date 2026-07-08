@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { extFor, textContains } from "./util.js";
 import { loadProfile } from "./config.js";
+import { MapepireBackend } from "./mapepire.js";
 import { assertCompileCommandAllowed, buildCompileCommand, buildLibraryListCommands, parseEvfevent } from "./compile.js";
 
 test("extFor uses the member type as the extension", () => {
@@ -96,4 +97,9 @@ test("buildLibraryListCommands builds the right CL per action", () => {
   // replace drops QTEMP (implicit) and can set the current library
   assert.deepEqual(buildLibraryListCommands("replace", { libraries: ["A", "QTEMP", "B"], currentLibrary: "C" }), ["chglibl libl(A B) curlib(C)"]);
   assert.deepEqual(buildLibraryListCommands("replace", { libraries: [] }), ["chglibl libl(*none)"]);
+});
+
+test("changeLibraryList is refused in read-only mode (before any connect)", async () => {
+  const be = new MapepireBackend(loadProfile({ IBMI_HOST: "h", IBMI_USER: "u", IBMI_PASSWORD: "pw", IBMI_READ_ONLY: "true" } as any));
+  await assert.rejects(() => be.changeLibraryList("add", { library: "MYLIB" }), /read-only/);
 });

@@ -168,6 +168,7 @@ export class MapepireBackend implements SourceBackend {
   // objects), but it does affect later compiles, so it runs on the serialized job.
   // Names go through validName first, the trust boundary. Returns the new list.
   async changeLibraryList(action: LibraryListAction, change: LibraryListChange): Promise<LibraryListEntry[]> {
+    if (this.profile.readOnly) throw new Error("read-only mode (IBMI_READ_ONLY): changing the library list is disabled");
     const args: LibraryListChange = { position: change.position };
     if (action === "add" || action === "remove" || action === "set_current") {
       if (!change.library) throw new Error(`library-list action "${action}" needs a library`);

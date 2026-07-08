@@ -131,7 +131,7 @@ All `.env` and `.env.*` files are git-ignored, only `.env.example` is committed.
 
 ### Library list
 
-- **`manage_library_list`**: view or change the connection's library list. `action: show` returns the current list (the SYSTEM, PRODUCT, CURRENT, and USER portions). `action: add` and `remove` add or drop one library (`ADDLIBLE` / `RMVLIBLE`), `set_current` sets the current library (`CHGCURLIB`), and `replace` sets the whole user portion at once (`CHGLIBL`). The connection uses one job for the whole session, so a change stays in effect and later compiles use it, just like adding a library on the green screen. It only ever changes the job's library list, never objects or data. Use it when a compile needs a library that is not on the sign-on list. The library list otherwise comes from the connecting profile, so administrators can set the everyday list on the account.
+- **`manage_library_list`**: view or change the connection's library list. `action: show` returns the current list (the SYSTEM, PRODUCT, CURRENT, and USER portions). `action: add` and `remove` add or drop one library (`ADDLIBLE` / `RMVLIBLE`), `set_current` sets the current library (`CHGCURLIB`), and `replace` sets the whole user portion at once (`CHGLIBL`). The connection uses one job for the whole session, so a change stays in effect and later compiles use it, just like adding a library on the green screen. It only ever changes the job's library list, never objects or data. Use it when a compile needs a library that is not on the sign-on list. The library list otherwise comes from the connecting profile, so administrators can set the everyday list on the account. The change actions honour `IBMI_READ_ONLY` (they are refused when it is on), while `show` always works.
 
 ### Change
 
