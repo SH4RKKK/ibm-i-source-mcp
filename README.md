@@ -100,6 +100,7 @@ A real environment variable, if one is set, always takes precedence over a value
 | `IBMI_SOURCE_FILE_CCSID` | no | `37` | EBCDIC page used for CCSID 65535 source columns |
 | `IBMI_LOCAL_DIR` | no | `ibmi-src` | where local copies are written |
 | `IBMI_MAPEPIRE_JAR` | no | | path to a mapepire jar already on the box, instead of the bundled one |
+| `IBMI_CONNECT_TIMEOUT_MS` | no | `20000` | give up on reaching the box over SSH after this many milliseconds |
 | `IBMI_READ_ONLY` | no | `false` | `true` disables upload and compile (read, search, and list only) |
 | `IBMI_HOST_FINGERPRINT` | no | | pin the SSH host key, for example `SHA256:xxxx`, instead of trust on first use |
 | `IBMI_BLOCKED_CL` | no | | extra CL verbs to refuse as a compile command, comma separated |
@@ -132,7 +133,7 @@ All `.env` and `.env.*` files are git-ignored, only `.env.example` is committed.
 
 ### Read
 
-- **`read_source_member`**: give it a library, source file, and member. It returns the source as clean UTF-8 and saves an editable local copy at `ibmi-src/<lib>/<file>/<member>.<ext>`, where the extension is the member type (a display file becomes `.dspf`, an RPGLE program `.rpgle`, and so on). It also saves an untouched backup under a single backup root that mirrors the tree, `ibmi-src/.backup/<lib>/<file>/<member>.<ext>`, refreshed on every read, so you can always get the original back if an edit goes wrong. It returns metadata too: type, ccsid, line count, and last changed date.
+- **`read_source_member`**: give it a library, source file, and member. It downloads the source as clean UTF-8 into an editable local copy at `ibmi-src/<lib>/<file>/<member>.<ext>`, where the extension is the member type (a display file becomes `.dspf`, an RPGLE program `.rpgle`, and so on). It also saves an untouched backup under a single backup root that mirrors the tree, `ibmi-src/.backup/<lib>/<file>/<member>.<ext>`, refreshed on every read, so you can always get the original back if an edit goes wrong. The tool result is just the saved paths and metadata (type, ccsid, line count, last changed date), not the source text: the assistant reads the saved file, which keeps big members from flooding the conversation with tokens it would save to disk anyway.
 
 ### Library list
 
@@ -153,6 +154,54 @@ Say you ask: "find the display file that shows department information, and note 
 4. You edit the local copy, by hand or with the assistant's help.
 5. `upload_source_member(...)` sends the change back into the member.
 6. `compile_member(..., targetLibrary: "DEVLIB")` reports SUCCESS, or FAILED with the listing and the exact message IDs and line numbers to fix.
+
+## Progress and logging
+
+Every tool narrates what it is doing while it runs, so you are never staring at a silent spinner
+wondering whether the box is slow or gone. It uses the two channels the
+[MCP spec](https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/progress) defines:
+
+- **Progress notifications** (`notifications/progress`): when the client sends a `progressToken` with
+  a tool call (Claude Code does), the server streams live updates back: which phase it is in, and a
+  real progress bar where there is something to count. Connecting reports each stage (reaching the
+  box, uploading the mapepire jar with a MB progress bar on first use, waiting for the JVM to start).
+  Search reports member by member (`scanning QRPGLESRC(MYPGM), 3 match(es) so far`, 42/180).
+  Upload reports lines written (`uploading MYPGM: 1500/3200 lines`). Compile reports each step from
+  the compile command to fetching the spool listing and reading the EVFEVENT errors.
+- **Log notifications** (`notifications/message`, the MCP `logging` capability): durable events go to
+  the client's log with the tool name as the logger. Connections made, uploads completed, truncated
+  lines, compile results, and every failure. Clients can raise or lower the level with
+  `logging/setLevel`. When a client never sends a `progressToken`, the step messages fall back to
+  info level log notifications, so the story is still visible. Everything is also mirrored to stderr
+  for local debugging.
+
+Stalls are made visible instead of silent. While connecting, a heartbeat reports every few seconds
+that it is still trying to reach the box, and the SSH connect gives up after
+`IBMI_CONNECT_TIMEOUT_MS` (default 20 seconds) with a plain explanation: host not found, connection
+refused, no route, or sign on failed. During any other silence a watchdog repeats the last known
+step with the elapsed time (`still working: compiling MYPGM (24s elapsed)`). If the session drops
+mid call (box IPL, vpn drop), the running call fails fast with a clear connection lost error instead
+of hanging, and the next call reconnects on its own.
+
+### The stats footer
+
+How much of this you see live depends on the client: rendering progress is the client's job, and
+some clients (the Claude Code VS Code extension at the time of writing) show only the tool name
+while a call runs. So every tool result carries a stats footer: one line of stats, then the trail
+replaying what happened when, with each progress bar collapsed to its final state:
+
+```
+[search_source: 44.1s, 61 live progress update(s) streamed]
+    0.2s  listing members in MYLIB/SOURCE
+    0.9s  scanning 1200 member(s) in MYLIB/SOURCE for "afdeling"
+   43.8s  scanning SOURCE(MYSRCMBR), 60 match(es) so far (178/1200)
+   44.0s  search for "afdeling" in MYLIB: 60 match(es) across 1200 member(s)
+```
+
+The progression lands in the transcript even when nothing was rendered live, on failures too (a
+timeout shows the connect heartbeats leading up to it). The footer also says when the client never
+asked for progress (`the client sent no progressToken`), which separates "not requested" from "not
+displayed", and `list_servers` reports the same as a diagnostic.
 
 ## How it works
 
@@ -211,10 +260,11 @@ src/
   config.ts      .env and env-var loader
   mapepire.ts    mapepire backend (read, search, list, write, compile over SQL)
   sshMapepire.ts SSH transport: runs the bundled mapepire jar in single mode
+  report.ts      progress and logging reporter (notifications, stall watchdog, stats footer)
   compile.ts     compile command templates and EVFEVENT parser
   util.ts        type-to-extension map, local-copy writer, text match
   types.ts       shared types and the SourceBackend interface
-  selfcheck.ts   asserts for the parse and config logic
+  selfcheck.ts   asserts for the parse, config, and reporter logic
 vendor/
   mapepire-server.jar   the mapepire server, uploaded and run on the box
 ```

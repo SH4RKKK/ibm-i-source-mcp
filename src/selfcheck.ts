@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { extFor, textContains } from "./util.js";
 import { loadProfile } from "./config.js";
 import { MapepireBackend } from "./mapepire.js";
+import { ToolReporter } from "./report.js";
 import { assertCompileCommandAllowed, buildCompileCommand, buildLibraryListCommands, parseEvfevent } from "./compile.js";
 
 test("extFor uses the member type as the extension", () => {
@@ -102,4 +103,63 @@ test("buildLibraryListCommands builds the right CL per action", () => {
 test("changeLibraryList is refused in read-only mode (before any connect)", async () => {
   const be = new MapepireBackend(loadProfile({ IBMI_HOST: "h", IBMI_USER: "u", IBMI_PASSWORD: "pw", IBMI_READ_ONLY: "true" } as any));
   await assert.rejects(() => be.changeLibraryList("add", { library: "MYLIB" }), /read-only/);
+});
+
+test("loadProfile parses the connect timeout, with a 20s default", () => {
+  const base = { IBMI_HOST: "h", IBMI_USER: "u", IBMI_PASSWORD: "pw" };
+  assert.equal(loadProfile(base as any).connectTimeoutMs, 20000);
+  assert.equal(loadProfile({ ...base, IBMI_CONNECT_TIMEOUT_MS: "5000" } as any).connectTimeoutMs, 5000);
+});
+
+test("ToolReporter: progress values only ever increase, and bar phases stay aligned after steps", () => {
+  const sent: { p: number; t?: number; m: string }[] = [];
+  const r = new ToolReporter("t", { sendProgress: (p, t, m) => sent.push({ p, t, m }), sendLog: () => {} });
+  r.step("connect");        // 1, always sent
+  r.bar("scan a", 1, 3);    // throttled away (right after the step, not final)
+  r.bar("scan b", 3, 3);    // final bar of the phase, always sent: base 1 -> 4/4
+  r.step("done");           // 5
+  assert.equal(sent.length, 3);
+  for (let i = 1; i < sent.length; i++) assert.ok(sent[i].p > sent[i - 1].p, `progress must increase (${sent[i - 1].p} -> ${sent[i].p})`);
+  assert.deepEqual(sent[1], { p: 4, t: 4, m: "scan b" });
+});
+
+test("ToolReporter: without a progress token, steps fall back to info log notifications", () => {
+  const logs: string[] = [];
+  const r = new ToolReporter("t", { sendLog: (lvl, m) => logs.push(`${lvl}:${m}`) });
+  r.step("connecting");
+  r.log("warning", "w");
+  assert.deepEqual(logs, ["info:connecting", "warning:w"]);
+});
+
+test("ToolReporter: the footer reports stats and replays the trail (last bar state per phase)", () => {
+  const r = new ToolReporter("t", { sendProgress: () => {}, sendLog: () => {} });
+  r.step("connecting");
+  r.bar("scanning A", 1, 3);
+  r.bar("scanning B", 3, 3);
+  r.step("done scanning");
+  r.log("warning", "w");
+  const lines = r.footer().split("\n");
+  assert.match(lines[0], /^\[t: \d+\.\d+s, \d+ live progress update\(s\) streamed\]$/);
+  assert.match(lines[1], /^ +\d+\.\d+s  connecting$/);
+  assert.match(lines[2], /scanning B \(3\/3\)$/); // only the final bar state, not every tick
+  assert.match(lines[3], /done scanning$/);
+  assert.match(lines[4], /warning: w$/);
+  assert.equal(lines.length, 5);
+  const noToken = new ToolReporter("t", { sendLog: () => {} });
+  noToken.step("a");
+  assert.match(noToken.footer(), /no progressToken, 1 step\(s\) went to the MCP log/);
+});
+
+test("ToolReporter: the stall watchdog repeats the last message during silence and stops on dispose", async () => {
+  const sent: string[] = [];
+  const r = new ToolReporter("t", { sendProgress: (_p, _t, m) => sent.push(m), sendLog: () => {} }, 80).start();
+  r.step("connecting to box");
+  await new Promise((res) => setTimeout(res, 300));
+  r.dispose();
+  const nudges = sent.filter((m) => m.includes("still working"));
+  assert.ok(nudges.length >= 1, `expected at least one nudge, got: ${sent.join(" | ")}`);
+  assert.match(nudges[0], /still working: connecting to box \(\d+s elapsed\)/);
+  const count = sent.length;
+  await new Promise((res) => setTimeout(res, 150));
+  assert.equal(sent.length, count, "nothing may be sent after dispose");
 });

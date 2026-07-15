@@ -9,7 +9,22 @@ export interface Profile {
   readOnly: boolean;             // when true, upload/compile are refused (default false)
   hostFingerprint?: string;      // pinned SSH host key fingerprint (SHA256:...); else trust-on-first-use
   blockedCl: string[];           // extra destructive CL verbs to block on compile, on top of the defaults
+  connectTimeoutMs: number;      // give up on the ssh connect after this long (default 20000)
 }
+
+// MCP logging levels we use (the spec has more, these are enough here).
+export type LogLevel = "debug" | "info" | "notice" | "warning" | "error";
+
+// How a long operation tells the user what it is doing right now. Tool calls
+// get a real reporter (MCP progress + logging notifications); everything else
+// gets the no-op, so backend code can report unconditionally.
+export interface Reporter {
+  step(message: string): void;                                // a new phase, e.g. "connecting to X"
+  bar(message: string, current: number, total: number): void; // determinate progress, e.g. lines uploaded
+  log(level: LogLevel, message: string): void;                // durable event for the client's log
+}
+
+export const NOOP_REPORTER: Reporter = { step: () => {}, bar: () => {}, log: () => {} };
 
 export interface MemberRef {
   library: string;
@@ -110,14 +125,14 @@ export interface CompileResult {
 
 export interface SourceBackend {
   transport: "mapepire";
-  readMember(ref: MemberRef): Promise<{ content: string; meta: MemberMeta }>;
-  searchSource(opts: SearchOpts): Promise<SearchResult>;
-  listLibraries(filter?: string, includeSystem?: boolean): Promise<LibraryInfo[]>;
-  readLibraryList(): Promise<LibraryListEntry[]>;
-  changeLibraryList(action: LibraryListAction, change: LibraryListChange): Promise<LibraryListEntry[]>;
-  listSourceFiles(library: string): Promise<SourceFileInfo[]>;
-  listMembers(library: string, sourceFile?: string, memberType?: string): Promise<MemberInfo[]>;
-  writeMember(ref: MemberRef, content: string): Promise<{ warnings: string[] }>;
-  compile(opts: CompileOpts): Promise<CompileResult>;
+  readMember(ref: MemberRef, reporter?: Reporter): Promise<{ content: string; meta: MemberMeta }>;
+  searchSource(opts: SearchOpts, reporter?: Reporter): Promise<SearchResult>;
+  listLibraries(filter?: string, includeSystem?: boolean, reporter?: Reporter): Promise<LibraryInfo[]>;
+  readLibraryList(reporter?: Reporter): Promise<LibraryListEntry[]>;
+  changeLibraryList(action: LibraryListAction, change: LibraryListChange, reporter?: Reporter): Promise<LibraryListEntry[]>;
+  listSourceFiles(library: string, reporter?: Reporter): Promise<SourceFileInfo[]>;
+  listMembers(library: string, sourceFile?: string, memberType?: string, reporter?: Reporter): Promise<MemberInfo[]>;
+  writeMember(ref: MemberRef, content: string, reporter?: Reporter): Promise<{ warnings: string[] }>;
+  compile(opts: CompileOpts, reporter?: Reporter): Promise<CompileResult>;
   close(): Promise<void>;
 }

@@ -1,8 +1,9 @@
 import mapepire from "@ibm/mapepire-js";
-import type { CompileError, CompileOpts, CompileResult, LibraryListAction, LibraryListChange, LibraryListEntry, MemberMeta, MemberRef, Profile, SearchMatch, SearchOpts, SearchResult, SourceBackend } from "./types.js";
+import type { CompileError, CompileOpts, CompileResult, LibraryListAction, LibraryListChange, LibraryListEntry, MemberMeta, MemberRef, Profile, Reporter, SearchMatch, SearchOpts, SearchResult, SourceBackend } from "./types.js";
+import { NOOP_REPORTER } from "./types.js";
 import { assertCompileCommandAllowed, buildCompileCommand, buildLibraryListCommands, parseEvfevent } from "./compile.js";
 import { textContains } from "./util.js";
-import { closeSshMapepire, connectSshMapepire } from "./sshMapepire.js";
+import { closeSshMapepire, connectSshMapepire, raceJobClosed } from "./sshMapepire.js";
 
 const { SQLJob } = mapepire;
 
@@ -28,6 +29,7 @@ const MAX_ROWS = 100_000;
 export class MapepireBackend implements SourceBackend {
   readonly transport = "mapepire" as const;
   private job?: InstanceType<typeof SQLJob>;
+  private connecting?: Promise<InstanceType<typeof SQLJob>>;
   private chain: Promise<unknown> = Promise.resolve();
   private splfTag?: string;      // USRDTA tag stamped on the job's spooled files
   private spoolReady = false;
@@ -44,16 +46,27 @@ export class MapepireBackend implements SourceBackend {
 
   // SSH in and run the jar in --single mode (see sshMapepire.ts). The SQLJob and
   // its query engine are unchanged, only the socket under it is an SSH stream.
-  private async connect(): Promise<InstanceType<typeof SQLJob>> {
-    if (this.job) return this.job;
-    this.job = await connectSshMapepire(this.profile);
+  // A job whose socket closed (box rebooted, vpn dropped) is discarded and a
+  // fresh connection is made, instead of hanging on the dead one. Concurrent
+  // callers share one connect attempt via the memoized promise.
+  private async connect(reporter: Reporter = NOOP_REPORTER): Promise<InstanceType<typeof SQLJob>> {
+    if (this.job && (this.job as any).status !== "ended") return this.job;
+    if (!this.connecting) {
+      if (this.job) {
+        reporter.log("notice", `connection to ${this.profile.host} was lost, reconnecting`);
+        this.job = undefined;
+        this.spoolReady = false; // ovrprtf was job scoped, the new job needs it again
+      }
+      this.connecting = connectSshMapepire(this.profile, reporter).finally(() => (this.connecting = undefined));
+    }
+    this.job = await this.connecting;
     return this.job;
   }
 
   private async sql(statement: string, parameters?: any[]): Promise<Row[]> {
     const job = await this.connect();
     const q = (job as any).query(statement, parameters ? { parameters } : undefined);
-    const rs = await q.execute(MAX_ROWS);
+    const rs: any = await raceJobClosed(job, q.execute(MAX_ROWS));
     await q.close?.();
     // No paging: if the server says it is not done, there were more than MAX_ROWS
     // rows. Fail loudly rather than hand back a truncated member or member list.
@@ -71,16 +84,18 @@ export class MapepireBackend implements SourceBackend {
   private async clResult(command: string): Promise<any> {
     const job = await this.connect();
     const q = (job as any).query(command, { isClCommand: true });
-    const rs = await q.execute();
+    const rs = await raceJobClosed(job, q.execute());
     await q.close?.();
     return rs;
   }
 
-  async readMember(ref: MemberRef): Promise<{ content: string; meta: MemberMeta }> {
+  async readMember(ref: MemberRef, reporter: Reporter = NOOP_REPORTER): Promise<{ content: string; meta: MemberMeta }> {
     const lib = validName(ref.library, "library");
     const srcf = validName(ref.sourceFile, "sourceFile");
     const mbr = validName(ref.member, "member");
+    await this.connect(reporter);
     return this.serialize(async () => {
+      reporter.step(`reading ${lib}/${srcf}(${mbr})`);
       const over = randOver();
       await this.cl(`ovrdbf file(${over}) tofile(${lib}/${srcf}) mbr(${mbr}) ovrscope(*job)`);
       try {
@@ -93,6 +108,7 @@ export class MapepireBackend implements SourceBackend {
         const srcdta = ccsid === 65535 ? `cast(srcdta as varchar(${len}) ccsid ${this.profile.sourceFileCcsid}) as srcdta` : "srcdta";
         const rows = await this.sql(`select ${srcdta} from ${over}`);
         const content = rows.map((r) => r.SRCDTA ?? "").join("\n");
+        reporter.step(`downloaded ${rows.length} lines from ${lib}/${srcf}(${mbr})`);
         const info = await this.memberInfo(lib, srcf, mbr);
         return {
           content,
@@ -141,11 +157,13 @@ export class MapepireBackend implements SourceBackend {
   // libraries (where source lives), *ALL adds the IBM Q* system libraries. An
   // optional filter narrows by a substring of the name or description, so an
   // agent can home in on where source lives without dumping the whole system.
-  async listLibraries(filter?: string, includeSystem = false): Promise<{ name: string; text: string }[]> {
+  async listLibraries(filter?: string, includeSystem = false, reporter: Reporter = NOOP_REPORTER): Promise<{ name: string; text: string }[]> {
     const scope = includeSystem ? "*ALL" : "*ALLUSR";
     const f = filter?.trim();
     const like = f ? f.replace(/'/g, "''").toUpperCase() : undefined; // for the LIKE literal
     const where = like ? `where upper(objname) like '%${like}%' or upper(objtext) like '%${like}%'` : "";
+    await this.connect(reporter);
+    reporter.step(`listing ${includeSystem ? "all" : "user"} libraries${f ? ` matching "${f}"` : ""}, a full scan can take a moment`);
     const rows = await this.sql(
       `select rtrim(objname) as name, coalesce(rtrim(objtext), '') as text
        from table(qsys2.object_statistics('${scope}', '*LIB')) ${where}
@@ -156,7 +174,9 @@ export class MapepireBackend implements SourceBackend {
 
   // The connection's library list (SYSTEM / PRODUCT / CURRENT / USER portions),
   // in search order. Read-only, so no serialize needed.
-  async readLibraryList(): Promise<LibraryListEntry[]> {
+  async readLibraryList(reporter: Reporter = NOOP_REPORTER): Promise<LibraryListEntry[]> {
+    await this.connect(reporter);
+    reporter.step("reading the library list");
     const rows = await this.sql(
       `select type, rtrim(system_schema_name) as lib from qsys2.library_list_info order by ordinal_position`,
     );
@@ -167,7 +187,7 @@ export class MapepireBackend implements SourceBackend {
   // chgcurlib / chglibl. Session scoped and non-destructive (it never touches
   // objects), but it does affect later compiles, so it runs on the serialized job.
   // Names go through validName first, the trust boundary. Returns the new list.
-  async changeLibraryList(action: LibraryListAction, change: LibraryListChange): Promise<LibraryListEntry[]> {
+  async changeLibraryList(action: LibraryListAction, change: LibraryListChange, reporter: Reporter = NOOP_REPORTER): Promise<LibraryListEntry[]> {
     if (this.profile.readOnly) throw new Error("read-only mode (IBMI_READ_ONLY): changing the library list is disabled");
     const args: LibraryListChange = { position: change.position };
     if (action === "add" || action === "remove" || action === "set_current") {
@@ -178,17 +198,23 @@ export class MapepireBackend implements SourceBackend {
       if (change.currentLibrary) args.currentLibrary = validName(change.currentLibrary, "currentLibrary");
     }
     const cmds = buildLibraryListCommands(action, args);
+    await this.connect(reporter);
     return this.serialize(async () => {
       for (const c of cmds) {
+        reporter.step(`running ${c}`);
         const r = await this.clResult(c);
         if (r?.success === false) throw new Error(`${c} failed: ${r.error || r.sql_state || "unknown error"}`);
       }
+      reporter.log("info", `library list changed (${action}): ${cmds.join("; ")}`);
+      reporter.step("reading the updated library list");
       return this.readLibraryList();
     });
   }
 
-  async listSourceFiles(library: string): Promise<{ name: string; text: string }[]> {
+  async listSourceFiles(library: string, reporter: Reporter = NOOP_REPORTER): Promise<{ name: string; text: string }[]> {
     const lib = validName(library, "library");
+    await this.connect(reporter);
+    reporter.step(`listing source files in ${lib}`);
     const rows = await this.sql(
       `select rtrim(system_table_name) as name, coalesce(rtrim(table_text), '') as text
        from qsys2.systables where table_schema='${lib}' and file_type='S' order by name`,
@@ -196,10 +222,12 @@ export class MapepireBackend implements SourceBackend {
     return rows.map((r) => ({ name: r.NAME, text: r.TEXT }));
   }
 
-  async listMembers(library: string, sourceFile?: string, memberType?: string) {
+  async listMembers(library: string, sourceFile?: string, memberType?: string, reporter: Reporter = NOOP_REPORTER) {
     const lib = validName(library, "library");
     const srcf = sourceFile ? validName(sourceFile, "sourceFile") : undefined;
     const type = memberType ? validName(memberType, "memberType") : undefined;
+    await this.connect(reporter);
+    reporter.step(`listing members in ${lib}${srcf ? `/${srcf}` : " (all source files)"}`);
     const rows = await this.serialize(() => this.enumerateMembers(lib, srcf, type));
     return rows.map((r) => ({ sourceFile: r.SOURCE_FILE, name: r.NAME, type: (r.TYPE || "").toLowerCase(), text: r.TEXT || "", lines: Number(r.LINES) || undefined }));
   }
@@ -207,7 +235,7 @@ export class MapepireBackend implements SourceBackend {
   // Discovery search: a member surfaces if the term is in its name, its text
   // description, or its code, so a purpose word can match even when it never
   // appears in the source itself.
-  async searchSource(opts: SearchOpts): Promise<SearchResult> {
+  async searchSource(opts: SearchOpts, reporter: Reporter = NOOP_REPORTER): Promise<SearchResult> {
     const lib = validName(opts.library, "library");
     const srcf = opts.sourceFile ? validName(opts.sourceFile, "sourceFile") : undefined;
     const type = opts.memberType ? validName(opts.memberType, "memberType") : undefined;
@@ -217,14 +245,18 @@ export class MapepireBackend implements SourceBackend {
     const needle = (cs ? raw : raw.toUpperCase()).replace(/'/g, "''"); // for the LIKE literal
     const cmp = cs ? "srcdta" : "upper(srcdta)";
 
+    await this.connect(reporter);
     return this.serialize(async () => {
+      reporter.step(`listing members in ${lib}${srcf ? `/${srcf}` : ""}`);
       const members = await this.enumerateMembers(lib, srcf, type);
+      reporter.step(`scanning ${members.length} member(s) in ${lib}${srcf ? `/${srcf}` : ""} for "${raw}"`);
       const matches: SearchMatch[] = [];
       let truncated = false;
       const add = (m: SearchMatch) => { if (matches.length >= max) { truncated = true; return false; } matches.push(m); return true; };
 
-      outer: for (const m of members) {
+      outer: for (const [idx, m] of members.entries()) {
         const file = m.SOURCE_FILE, name = m.NAME, mtype = (m.TYPE || "").toLowerCase(), text = m.TEXT || "";
+        reporter.bar(`scanning ${file}(${name}), ${matches.length} match(es) so far`, idx + 1, members.length);
         if (textContains(name, raw, cs) && !add({ library: lib, sourceFile: file, member: name, type: mtype, text, matchedOn: "name" })) break;
         if (textContains(text, raw, cs) && !add({ library: lib, sourceFile: file, member: name, type: mtype, text, matchedOn: "text" })) break;
         // content scan (source members only, so SRCDTA exists)
@@ -239,18 +271,21 @@ export class MapepireBackend implements SourceBackend {
           await this.cl(`dltovr file(${over}) lvl(*job)`).catch(() => {});
         }
       }
+      reporter.log("info", `search for "${raw}" in ${lib}: ${matches.length} match(es) across ${members.length} member(s)${truncated ? " (truncated at maxResults)" : ""}`);
       return { matches, truncated };
     });
   }
 
   // Write local text back into the member: clrpfm + chunked insert through the
   // same ovrdbf alias the read path uses. No SFTP needed.
-  async writeMember(ref: MemberRef, content: string): Promise<{ warnings: string[] }> {
+  async writeMember(ref: MemberRef, content: string, reporter: Reporter = NOOP_REPORTER): Promise<{ warnings: string[] }> {
     if (this.profile.readOnly) throw new Error("read-only mode (IBMI_READ_ONLY): upload is disabled");
     const lib = validName(ref.library, "library");
     const srcf = validName(ref.sourceFile, "sourceFile");
     const mbr = validName(ref.member, "member");
+    await this.connect(reporter);
     return this.serialize(async () => {
+      reporter.step(`checking the record length of ${lib}/${srcf}`);
       const col = (await this.sql(
         `select length from qsys2.syscolumns where table_schema='${lib}' and table_name='${srcf}' and column_name='SRCDTA'`,
       ))[0];
@@ -262,20 +297,32 @@ export class MapepireBackend implements SourceBackend {
         if (l.length > len) { warnings.push(`line ${i + 1} truncated to ${len} chars`); return l.slice(0, len); }
         return l;
       });
+      if (warnings.length) reporter.log("warning", `${warnings.length} line(s) are longer than the ${len}-char record length and will be truncated`);
       const scale = lines.length >= 10000; // SRCSEQ is packed(6,2), max 9999.99
       const over = randOver();
       await this.cl(`ovrdbf file(${over}) tofile(${lib}/${srcf}) mbr(${mbr}) ovrscope(*job)`);
       try {
+        reporter.log("info", `replacing the content of ${lib}/${srcf}(${mbr}) with ${lines.length} lines`);
+        reporter.step(`clearing ${mbr} (clrpfm) before the upload`);
         await this.cl(`clrpfm file(${lib}/${srcf}) mbr(${mbr})`);
         const CHUNK = 500; // keep each insert well under the ~400KB statement limit
-        for (let i = 0; i < lines.length; i += CHUNK) {
-          const vals = lines.slice(i, i + CHUNK).map((l, j) => {
-            const n = i + j + 1;
-            const seq = scale ? (n / 100).toFixed(2) : String(n);
-            return `(${seq}, 0, '${l.replace(/'/g, "''")}')`;
-          }).join(",");
-          await this.sql(`insert into ${over} (srcseq, srcdat, srcdta) values ${vals}`);
+        let written = 0;
+        try {
+          for (let i = 0; i < lines.length; i += CHUNK) {
+            const vals = lines.slice(i, i + CHUNK).map((l, j) => {
+              const n = i + j + 1;
+              const seq = scale ? (n / 100).toFixed(2) : String(n);
+              return `(${seq}, 0, '${l.replace(/'/g, "''")}')`;
+            }).join(",");
+            await this.sql(`insert into ${over} (srcseq, srcdat, srcdta) values ${vals}`);
+            written = Math.min(i + CHUNK, lines.length);
+            reporter.bar(`uploading ${mbr}: ${written}/${lines.length} lines`, written, lines.length);
+          }
+        } catch (e: any) {
+          // The member was already cleared, so a failure here leaves it incomplete.
+          throw new Error(`upload stopped at ${written}/${lines.length} lines, ${lib}/${srcf}(${mbr}) is incomplete, upload again once the problem is fixed: ${e.message}`);
         }
+        reporter.log("info", `uploaded ${lines.length} lines to ${lib}/${srcf}(${mbr})${warnings.length ? ` (${warnings.length} truncated line(s))` : ""}`);
         return { warnings };
       } finally {
         await this.cl(`dltovr file(${over}) lvl(*job)`).catch(() => {});
@@ -302,14 +349,19 @@ export class MapepireBackend implements SourceBackend {
     }
   }
 
-  async compile(opts: CompileOpts): Promise<CompileResult> {
+  async compile(opts: CompileOpts, reporter: Reporter = NOOP_REPORTER): Promise<CompileResult> {
     if (this.profile.readOnly) throw new Error("read-only mode (IBMI_READ_ONLY): compile is disabled");
     const srclib = validName(opts.library, "library");
     const srcf = validName(opts.sourceFile, "sourceFile");
     const mbr = validName(opts.member, "member");
     const tgtlib = opts.targetLibrary ? validLibOrStar(opts.targetLibrary, "targetLibrary") : "*CURLIB";
     const name = opts.objectName ? validName(opts.objectName, "objectName") : mbr;
-    const type = opts.type ?? (await this.memberInfo(srclib, srcf, mbr)).type;
+    await this.connect(reporter);
+    let type = opts.type;
+    if (!type) {
+      reporter.step(`detecting the member type of ${srclib}/${srcf}(${mbr})`);
+      type = (await this.memberInfo(srclib, srcf, mbr)).type;
+    }
     const command = buildCompileCommand(type, { tgtlib, name, srclib, srcfile: srcf, mbr }, opts.command);
     // Guard the command (especially a user-supplied override) before it runs as CL.
     assertCompileCommandAllowed(command, this.profile.blockedCl);
@@ -319,8 +371,11 @@ export class MapepireBackend implements SourceBackend {
       const startRow = (await this.sql(`values current timestamp`))[0];
       const startTs = startRow ? String(Object.values(startRow)[0]) : undefined;
 
+      reporter.log("info", `compile command: ${command}`);
+      reporter.step(`compiling ${mbr} (${command.trim().split(/\s+/)[0]}) on ${this.profile.host}`);
       const result = await this.clResult(command);
       const success = result?.success !== false;
+      reporter.step(`compile ${success ? "succeeded" : "failed"}, fetching the compiler listing from spool`);
 
       let listing = "";
       try {
@@ -344,11 +399,14 @@ export class MapepireBackend implements SourceBackend {
 
       // Structured errors need a concrete target library to locate EVFEVENT.
       let errors: CompileError[] = [];
-      if (tgtlib !== "*CURLIB") errors = await this.readEvents(tgtlib, name).catch(() => []);
-      else listing += "\n\n(pass an explicit targetLibrary for structured EVFEVENT errors)";
+      if (tgtlib !== "*CURLIB") {
+        reporter.step(`reading structured errors from ${tgtlib}/EVFEVENT(${name})`);
+        errors = await this.readEvents(tgtlib, name).catch(() => []);
+      } else listing += "\n\n(pass an explicit targetLibrary for structured EVFEVENT errors)";
 
       await this.cl(`dltsplf file(*select) select(*current *all *all ${this.splfTag})`).catch(() => {});
       const messages = result?.error ? `[${result.sql_state ?? ""}] ${result.error}` : "";
+      reporter.log(success ? "info" : "error", `compile ${mbr}: ${success ? "SUCCESS" : "FAILED"} (${errors.length} evfevent record(s))`);
       return { command, success, listing, messages, errors };
     });
   }

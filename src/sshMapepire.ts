@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 import { Client } from "ssh2";
 import type { SFTPWrapper } from "ssh2";
 import mapepire from "@ibm/mapepire-js";
-import type { Profile } from "./types.js";
+import type { Profile, Reporter } from "./types.js";
+import { NOOP_REPORTER } from "./types.js";
 
 const { SQLJob } = mapepire;
 type Job = InstanceType<typeof SQLJob>;
@@ -74,16 +75,44 @@ class StreamSocket extends EventEmitter {
   close(): void { try { this.stream.end(); } catch { /* already gone */ } }
 }
 
-// JVM cold start on IBM i can be slow, so give the first handshake room.
-const CONNECT_TIMEOUT_MS = 60000;
+// The mapepire handshake after the jar starts: JVM cold start on IBM i can be
+// slow, so give it a full minute (the ssh connect has its own, shorter timeout).
+const MAPEPIRE_TIMEOUT_MS = 60000;
 
 function sftp(conn: Client): Promise<SFTPWrapper> {
   return new Promise((res, rej) => conn.sftp((e, s) => (e ? rej(e) : res(s))));
 }
 
+// Turn low-level ssh connect failures into messages that say what is actually
+// wrong with reaching the box, instead of a bare socket error. Classified on
+// ssh2's structured `level` and errno codes first; the message regexes are a
+// fallback in case a future ssh2 rewords its errors.
+function describeConnectError(e: Error, where: string, user: string, afterSecs: number): Error {
+  const msg = e?.message || String(e);
+  const code = (e as NodeJS.ErrnoException)?.code;
+  const level = (e as any)?.level as string | undefined;
+  if (level === "client-timeout" || /timed out/i.test(msg))
+    return new Error(
+      `IBM i at ${where} is not reachable: no ssh answer within ${afterSecs}s. ` +
+        `Check the host and port, the network or vpn, and that the ssh server runs (strtcpsvr server(*sshd)). ` +
+        `Raise IBMI_CONNECT_TIMEOUT_MS if the box is just slow.`,
+    );
+  if (code === "ECONNREFUSED")
+    return new Error(`IBM i at ${where} refused the connection: the machine answered but nothing listens on that port. Is the ssh server started (strtcpsvr server(*sshd)) and is IBMI_SSH_PORT right?`);
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN")
+    return new Error(`IBM i host not found: "${where}" does not resolve. Check IBMI_HOST for typos, and your dns or vpn.`);
+  if (code === "EHOSTUNREACH" || code === "ENETUNREACH")
+    return new Error(`IBM i at ${where} is not reachable: no route to host (after ${afterSecs}s). Check the network or vpn.`);
+  if (level === "client-authentication" || /authentication/i.test(msg))
+    return new Error(`reached ${where}, but sign-on failed for user ${user}. Check IBMI_USER and IBMI_PASSWORD, and that the profile is not disabled.`);
+  return new Error(`cannot connect to ${where}: ${msg}`);
+}
+
+const mb = (n: number) => (n / 1048576).toFixed(1);
+
 // Upload the jar to $HOME/.ibm-i-source-mcp, replacing it only when the size
-// differs so a newer bundled jar takes over.
-async function ensureJar(conn: Client): Promise<string> {
+// differs so a newer bundled jar takes over. Uploads report a progress bar.
+async function ensureJar(conn: Client, reporter: Reporter): Promise<string> {
   verifyBundledJar();
   const s = await sftp(conn);
   try {
@@ -93,8 +122,17 @@ async function ensureJar(conn: Client): Promise<string> {
     const localSize = (await stat(BUNDLED_JAR)).size;
     const remoteSize = await new Promise<number>((res) => s.stat(remote, (e, st) => res(e ? -1 : st.size)));
     if (remoteSize !== localSize) {
+      reporter.log("info", `uploading mapepire-server.jar (${mb(localSize)} MB) to ${dir}, first run on this box or a jar update`);
       await new Promise<void>((res, rej) => s.mkdir(dir, (e) => (e && (e as any).code !== 4 ? rej(e) : res())));
-      await new Promise<void>((res, rej) => s.fastPut(BUNDLED_JAR, remote, (e) => (e ? rej(e) : res())));
+      await new Promise<void>((res, rej) =>
+        s.fastPut(
+          BUNDLED_JAR,
+          remote,
+          { step: (done, _chunk, total) => reporter.bar(`uploading mapepire-server.jar: ${mb(done)}/${mb(total)} MB`, done, total) },
+          (e) => (e ? rej(e) : res()),
+        ),
+      );
+      reporter.step("mapepire-server.jar uploaded");
     }
     return remote;
   } finally {
@@ -104,7 +142,9 @@ async function ensureJar(conn: Client): Promise<string> {
 
 // Open SSH, ensure the jar, spawn it --single, and return a connected SQLJob
 // driving that stream. The SSH client is attached to the job for teardown.
-export async function connectSshMapepire(profile: Profile): Promise<Job> {
+// The reporter narrates every phase (reaching the box, jar upload, JVM start)
+// with heartbeats, so a slow or dead server is visible while it happens.
+export async function connectSshMapepire(profile: Profile, reporter: Reporter = NOOP_REPORTER): Promise<Job> {
   const conn = new Client();
   const hostKey = `${profile.host}:${profile.sshPort}`;
   const expected = profile.hostFingerprint || loadKnownHosts()[hostKey];
@@ -112,36 +152,49 @@ export async function connectSshMapepire(profile: Profile): Promise<Job> {
   let mismatch = false;
   let firstUse = false;
 
-  await new Promise<void>((res, rej) => {
-    conn
-      .on("ready", res)
-      .on("error", (e) =>
-        rej(
-          mismatch
-            ? new Error(
-                `SSH host key for ${hostKey} does not match the trusted fingerprint.\n` +
-                  `  expected: ${expected}\n  got:      ${presented}\n` +
-                  `This can mean the box changed, or a man in the middle. If the change is expected, ` +
-                  `update IBMI_HOST_FINGERPRINT or remove the entry from ${knownHostsPath()}.`,
-              )
-            : e,
-        ),
-      )
-      .connect({
-        host: profile.host,
-        port: profile.sshPort,
-        username: profile.user,
-        password: profile.password,
-        keepaliveInterval: 15000,
-        // Verify the host key ourselves (ssh2 does not). Pin wins, else trust on first use.
-        hostVerifier: ((key: Buffer) => {
-          presented = hostFp(key);
-          if (expected) { mismatch = !fpEq(presented, expected); return !mismatch; }
-          firstUse = true;
-          return true;
-        }) as unknown as (key: Buffer) => boolean,
-      });
-  });
+  const t0 = Date.now();
+  const secs = () => Math.round((Date.now() - t0) / 1000);
+  reporter.step(`connecting to ${hostKey} over ssh as ${profile.user}`);
+  const beat = setInterval(
+    () => reporter.step(`still trying to reach ${hostKey} (${secs()}s, gives up at ${Math.round(profile.connectTimeoutMs / 1000)}s)`),
+    3000,
+  );
+  beat.unref?.();
+  try {
+    await new Promise<void>((res, rej) => {
+      conn
+        .on("ready", res)
+        .on("error", (e) =>
+          rej(
+            mismatch
+              ? new Error(
+                  `SSH host key for ${hostKey} does not match the trusted fingerprint.\n` +
+                    `  expected: ${expected}\n  got:      ${presented}\n` +
+                    `This can mean the box changed, or a man in the middle. If the change is expected, ` +
+                    `update IBMI_HOST_FINGERPRINT or remove the entry from ${knownHostsPath()}.`,
+                )
+              : describeConnectError(e, hostKey, profile.user, secs()),
+          ),
+        )
+        .connect({
+          host: profile.host,
+          port: profile.sshPort,
+          username: profile.user,
+          password: profile.password,
+          keepaliveInterval: 15000,
+          readyTimeout: profile.connectTimeoutMs,
+          // Verify the host key ourselves (ssh2 does not). Pin wins, else trust on first use.
+          hostVerifier: ((key: Buffer) => {
+            presented = hostFp(key);
+            if (expected) { mismatch = !fpEq(presented, expected); return !mismatch; }
+            firstUse = true;
+            return true;
+          }) as unknown as (key: Buffer) => boolean,
+        });
+    });
+  } finally {
+    clearInterval(beat);
+  }
 
   if (firstUse && presented) {
     saveKnownHost(hostKey, presented);
@@ -149,13 +202,15 @@ export async function connectSshMapepire(profile: Profile): Promise<Job> {
   }
 
   try {
-    const jarPath = profile.mapepireJar ?? (await ensureJar(conn));
+    reporter.step(`ssh connected to ${hostKey}, checking the mapepire server jar`);
+    const jarPath = profile.mapepireJar ?? (await ensureJar(conn, reporter));
     // Run the jar in single mode like Code for IBM i. The four QIBM_* vars turn
     // off PASE and Java stdio conversion so our UTF-8 JSON is not mangled to the
     // job CCSID. They are inline prefixes because IBM i sshd drops channel env vars.
     const cmd =
       `QIBM_JAVA_STDIO_CONVERT=N QIBM_PASE_DESCRIPTOR_STDIO=B QIBM_USE_DESCRIPTOR_STDIO=Y QIBM_MULTI_THREADED=Y ` +
       `java -Dos400.stdio.convert=N -jar ${jarPath} --single`;
+    reporter.step(`starting mapepire (java) on ${hostKey}, a cold jvm can take up to a minute`);
     const stream = await new Promise<import("ssh2").ClientChannel>((res, rej) =>
       conn.exec(cmd, (e, s) => (e ? rej(e) : res(s))),
     );
@@ -190,7 +245,7 @@ export async function connectSshMapepire(profile: Profile): Promise<Job> {
       .join(";");
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_, rej) => {
-      timer = setTimeout(() => rej(new Error(`mapepire connect timed out after ${CONNECT_TIMEOUT_MS}ms${socket.stderr ? `: ${socket.stderr.trim()}` : ""}`)), CONNECT_TIMEOUT_MS);
+      timer = setTimeout(() => rej(new Error(`mapepire connect timed out after ${MAPEPIRE_TIMEOUT_MS}ms${socket.stderr ? `: ${socket.stderr.trim()}` : ""}`)), MAPEPIRE_TIMEOUT_MS);
     });
     const handshake = j.send({
       id: SQLJob.getNewUniqueId(),
@@ -200,11 +255,18 @@ export async function connectSshMapepire(profile: Profile): Promise<Job> {
       props: props.length > 0 ? props : undefined,
     }) as Promise<{ success?: boolean; error?: string; id?: string }>;
 
+    const tJvm = Date.now();
+    const jvmBeat = setInterval(
+      () => reporter.step(`waiting for mapepire to answer on ${hostKey} (${Math.round((Date.now() - tJvm) / 1000)}s, gives up at ${MAPEPIRE_TIMEOUT_MS / 1000}s)`),
+      5000,
+    );
+    jvmBeat.unref?.();
     let resp: { success?: boolean; error?: string; id?: string };
     try {
       resp = await Promise.race([handshake, timeout, closedBeforeReady]);
     } finally {
       clearTimeout(timer);
+      clearInterval(jvmBeat);
       if (closedEarly) socket.removeListener("close", closedEarly);
     }
     if (resp?.success !== true) throw new Error(resp?.error || "mapepire connect failed");
@@ -213,11 +275,27 @@ export async function connectSshMapepire(profile: Profile): Promise<Job> {
     if (resp.id) j.id = resp.id;
 
     (job as any)._sshConn = conn;
+    // A promise that rejects when the session drops, so in-flight queries can
+    // race against it and fail fast instead of hanging on a dead socket.
+    const closed = new Promise<never>((_, rej) =>
+      socket.once("close", () => rej(new Error(`connection to ${profile.host} lost: the ssh session closed. The next call reconnects automatically.`))),
+    );
+    closed.catch(() => {}); // observed on demand via raceJobClosed
+    (job as any)._closed = closed;
+    reporter.log("info", `connected to ${hostKey} as ${profile.user} (mapepire over ssh)`);
+    reporter.step(`connected to ${hostKey}`);
     return job;
   } catch (e) {
     conn.end();
     throw e;
   }
+}
+
+// Race a promise against the job's connection-loss promise, so a query on a
+// session that died mid-flight rejects with a clear message instead of hanging.
+export function raceJobClosed<T>(job: Job, p: Promise<T>): Promise<T> {
+  const closed = (job as any)._closed as Promise<never> | undefined;
+  return closed ? Promise.race([p, closed]) : p;
 }
 
 // Tear down the mapepire job and the SSH connection behind it.
