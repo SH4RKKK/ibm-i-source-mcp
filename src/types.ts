@@ -60,24 +60,6 @@ export interface SearchMatch {
   line?: string;                 // the matching source line (code matches)
 }
 
-export interface MemberInfo {
-  sourceFile: string;
-  name: string;
-  type: string;
-  text: string;
-  lines?: number;
-}
-
-export interface SourceFileInfo {
-  name: string;
-  text: string;
-}
-
-export interface LibraryInfo {
-  name: string;
-  text: string;
-}
-
 export type LibraryListAction = "add" | "remove" | "set_current" | "replace";
 
 export interface LibraryListChange {
@@ -121,18 +103,4 @@ export interface CompileResult {
   listing: string;               // compiler spool listing
   messages: string;              // joblog / escape messages
   errors: CompileError[];        // parsed from EVFEVENT (best-effort)
-}
-
-export interface SourceBackend {
-  transport: "mapepire";
-  readMember(ref: MemberRef, reporter?: Reporter): Promise<{ content: string; meta: MemberMeta }>;
-  searchSource(opts: SearchOpts, reporter?: Reporter): Promise<SearchResult>;
-  listLibraries(filter?: string, includeSystem?: boolean, reporter?: Reporter): Promise<LibraryInfo[]>;
-  readLibraryList(reporter?: Reporter): Promise<LibraryListEntry[]>;
-  changeLibraryList(action: LibraryListAction, change: LibraryListChange, reporter?: Reporter): Promise<LibraryListEntry[]>;
-  listSourceFiles(library: string, reporter?: Reporter): Promise<SourceFileInfo[]>;
-  listMembers(library: string, sourceFile?: string, memberType?: string, reporter?: Reporter): Promise<MemberInfo[]>;
-  writeMember(ref: MemberRef, content: string, reporter?: Reporter): Promise<{ warnings: string[] }>;
-  compile(opts: CompileOpts, reporter?: Reporter): Promise<CompileResult>;
-  close(): Promise<void>;
 }

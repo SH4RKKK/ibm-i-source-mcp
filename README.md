@@ -263,7 +263,7 @@ src/
   report.ts      progress and logging reporter (notifications, stall watchdog, stats footer)
   compile.ts     compile command templates and EVFEVENT parser
   util.ts        type-to-extension map, local-copy writer, text match
-  types.ts       shared types and the SourceBackend interface
+  types.ts       shared types and the reporter interface
   selfcheck.ts   asserts for the parse, config, and reporter logic
 vendor/
   mapepire-server.jar   the mapepire server, uploaded and run on the box

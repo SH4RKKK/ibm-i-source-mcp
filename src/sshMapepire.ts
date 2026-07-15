@@ -79,6 +79,14 @@ class StreamSocket extends EventEmitter {
 // slow, so give it a full minute (the ssh connect has its own, shorter timeout).
 const MAPEPIRE_TIMEOUT_MS = 60000;
 
+// A self-unref'ing repeating timer: the "still waiting" heartbeats during a slow
+// connect. unref so it never keeps the process alive.
+function beat(fn: () => void, ms: number): NodeJS.Timeout {
+  const t = setInterval(fn, ms);
+  t.unref?.();
+  return t;
+}
+
 function sftp(conn: Client): Promise<SFTPWrapper> {
   return new Promise((res, rej) => conn.sftp((e, s) => (e ? rej(e) : res(s))));
 }
@@ -155,11 +163,10 @@ export async function connectSshMapepire(profile: Profile, reporter: Reporter = 
   const t0 = Date.now();
   const secs = () => Math.round((Date.now() - t0) / 1000);
   reporter.step(`connecting to ${hostKey} over ssh as ${profile.user}`);
-  const beat = setInterval(
+  const connBeat = beat(
     () => reporter.step(`still trying to reach ${hostKey} (${secs()}s, gives up at ${Math.round(profile.connectTimeoutMs / 1000)}s)`),
     3000,
   );
-  beat.unref?.();
   try {
     await new Promise<void>((res, rej) => {
       conn
@@ -193,7 +200,7 @@ export async function connectSshMapepire(profile: Profile, reporter: Reporter = 
         });
     });
   } finally {
-    clearInterval(beat);
+    clearInterval(connBeat);
   }
 
   if (firstUse && presented) {
@@ -256,11 +263,10 @@ export async function connectSshMapepire(profile: Profile, reporter: Reporter = 
     }) as Promise<{ success?: boolean; error?: string; id?: string }>;
 
     const tJvm = Date.now();
-    const jvmBeat = setInterval(
+    const jvmBeat = beat(
       () => reporter.step(`waiting for mapepire to answer on ${hostKey} (${Math.round((Date.now() - tJvm) / 1000)}s, gives up at ${MAPEPIRE_TIMEOUT_MS / 1000}s)`),
       5000,
     );
-    jvmBeat.unref?.();
     let resp: { success?: boolean; error?: string; id?: string };
     try {
       resp = await Promise.race([handshake, timeout, closedBeforeReady]);
