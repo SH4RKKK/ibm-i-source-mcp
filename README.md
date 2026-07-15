@@ -52,10 +52,10 @@ npm install -g ibm-i-source-mcp
 claude mcp add ibmi-source --scope user -- ibm-i-source-mcp
 ```
 
-Then create a `.env` with your connection details in the folder Claude Code launches the server from,
-and restart Claude Code or run `/mcp`. A package installed from npm has no project folder of its own,
-so it reads the `.env` from its working directory. If you want the `.env` to travel with the server,
-use Option B.
+Then create a `.env` with your connection details in `~/.ibm-i-source-mcp/` (create the folder if it
+does not exist), and restart Claude Code or run `/mcp`. A package installed from npm or run with `npx`
+has no stable folder of its own (the npx copy lives in a cache that is wiped on every update), so this
+home folder is the reliable place to keep credentials. See Configuration for the full search order.
 
 ### Option B: from source
 
@@ -81,9 +81,14 @@ To debug it on its own, use the MCP Inspector: `npx @modelcontextprotocol/inspec
 
 ## Configuration
 
-All configuration lives in a `.env` file. The server looks for `.env` in the folder it is launched
-from, then in its own install folder. A real environment variable, if one is set, takes precedence
-over the file.
+All configuration lives in a `.env` file. The server looks for it in these places, first match wins:
+
+1. the folder named in `IBMI_MCP_CONFIG_DIR`, if you set that environment variable
+2. the current working directory the server is launched from
+3. `~/.ibm-i-source-mcp/` (the recommended place for an npm or npx install)
+4. the server's own install folder, next to `dist/` (running from a source checkout)
+
+A real environment variable, if one is set, always takes precedence over a value in the file.
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|

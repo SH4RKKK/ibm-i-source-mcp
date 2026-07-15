@@ -1,12 +1,26 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { config as loadEnv, parse } from "dotenv";
 import type { Profile } from "./types.js";
 
-// Env files are looked for in the launch folder, then the install folder, so it
-// works run from source or via npx with a chosen working directory.
-const CONFIG_DIRS = [process.cwd(), join(dirname(fileURLToPath(import.meta.url)), "..")];
+// Where env files are looked for, in order. The first match wins, so an explicit
+// override beats the per-project folder, which beats the stable per-user home.
+//
+//   1. IBMI_MCP_CONFIG_DIR  an explicit folder, for anyone who wants to pin it
+//   2. process.cwd()        the launch folder, handy when run from a project
+//   3. ~/.ibm-i-source-mcp  a stable per-user home, the recommended place when
+//                           installed with npx (the install folder below lives
+//                           in the npx cache and is wiped on every update)
+//   4. install folder       next to dist/, so running from a source checkout
+//                           with .env files beside the build still works
+const CONFIG_DIRS = [
+  process.env.IBMI_MCP_CONFIG_DIR,
+  process.cwd(),
+  join(homedir(), ".ibm-i-source-mcp"),
+  join(dirname(fileURLToPath(import.meta.url)), ".."),
+].filter((d): d is string => Boolean(d));
 
 // The default server is .env, loaded into process.env. dotenv never overrides an
 // already set variable, so a real env var (or the first file found) wins.

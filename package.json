@@ -1,6 +1,6 @@
 {
   "name": "ibm-i-source-mcp",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "MCP server to read, search, browse, upload and compile IBM i (RPG/SQLRPGLE/CLLE/DDS) source members over mapepire (Db2 for i).",
   "type": "module",
   "bin": {
