@@ -74,5 +74,6 @@ export function loadProfile(env: NodeJS.ProcessEnv = process.env): Profile {
     readOnly: bool(env.IBMI_READ_ONLY, false),
     hostFingerprint: env.IBMI_HOST_FINGERPRINT || undefined,
     blockedCl: list(env.IBMI_BLOCKED_CL),
+    connectTimeoutMs: Number(env.IBMI_CONNECT_TIMEOUT_MS || 20000),
   };
 }
