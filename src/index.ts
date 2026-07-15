@@ -7,7 +7,6 @@ import { listServers, loadProfileFor } from "./config.js";
 import { MapepireBackend } from "./mapepire.js";
 import { makeReporter, ToolReporter } from "./report.js";
 import { findLocalCopy, writeLocalCopy } from "./util.js";
-import type { SourceBackend } from "./types.js";
 
 // Success result with the reporter's stats footer: what ran, for how long, and
 // whether progress was streamed. It is the visible trace of a call in clients
@@ -30,8 +29,8 @@ const LOCAL_DIR = process.env.IBMI_LOCAL_DIR || "ibmi-src";
 // One cached backend per server, so switching boxes reuses the open session.
 // Config loads lazily, so the server still starts and lists its tools with no
 // env file, and a bad config surfaces as a tool error, not a startup crash.
-const backends = new Map<string, SourceBackend>();
-async function getBackend(server?: string): Promise<SourceBackend> {
+const backends = new Map<string, MapepireBackend>();
+async function getBackend(server?: string): Promise<MapepireBackend> {
   const key = server?.toLowerCase() || "default";
   let be = backends.get(key);
   if (!be) {
@@ -71,7 +70,7 @@ mcp.tool(
         `Backup: ${backup}\n` +
         `Type: ${meta.type}  CCSID: ${meta.ccsid}  Lines: ${meta.lineCount}` +
         (meta.lastChanged ? `  Changed: ${meta.lastChanged}` : "") +
-        `  Transport: ${be.transport}\n\n` +
+        `  Transport: mapepire\n\n` +
         `The source is in the saved file, read it from there.`;
       return done(r, text);
     } catch (e) {
@@ -236,7 +235,7 @@ mcp.tool(
       }
       const { warnings } = await be.writeMember(ref, text, r);
       const warn = warnings.length ? `\nWarnings:\n- ${warnings.join("\n- ")}` : " No warnings.";
-      return { content: [{ type: "text", text: `Uploaded ${library}/${sourceFile}(${member}) via ${be.transport}.${warn}` }] };
+      return done(r, `Uploaded ${library}/${sourceFile}(${member}) via mapepire.${warn}`);
     } catch (e) {
       return r.failResult(e);
     } finally {
@@ -266,7 +265,7 @@ mcp.tool(
       const errs = res.errors.map((e) => `  [sev ${e.severity}]${e.line ? ` line ${e.line}` : ""} ${e.msgId ?? ""}: ${e.text}`).join("\n");
       const text =
         `Command: ${res.command}\n` +
-        `Status: ${res.success ? "SUCCESS" : "FAILED"}  Transport: ${be.transport}  Errors: ${res.errors.length}\n` +
+        `Status: ${res.success ? "SUCCESS" : "FAILED"}  Transport: mapepire  Errors: ${res.errors.length}\n` +
         (errs ? `\n${errs}\n` : "") +
         (res.messages ? `\n--- messages ---\n${res.messages}\n` : "") +
         (res.listing ? `\n--- listing ---\n${res.listing}` : "");

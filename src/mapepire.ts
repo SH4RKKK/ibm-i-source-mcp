@@ -1,5 +1,5 @@
 import mapepire from "@ibm/mapepire-js";
-import type { CompileError, CompileOpts, CompileResult, LibraryListAction, LibraryListChange, LibraryListEntry, MemberMeta, MemberRef, Profile, Reporter, SearchMatch, SearchOpts, SearchResult, SourceBackend } from "./types.js";
+import type { CompileError, CompileOpts, CompileResult, LibraryListAction, LibraryListChange, LibraryListEntry, MemberMeta, MemberRef, Profile, Reporter, SearchMatch, SearchOpts, SearchResult } from "./types.js";
 import { NOOP_REPORTER } from "./types.js";
 import { assertCompileCommandAllowed, buildCompileCommand, buildLibraryListCommands, parseEvfevent } from "./compile.js";
 import { textContains } from "./util.js";
@@ -26,8 +26,7 @@ const randOver = () => "O" + Math.random().toString(36).slice(2, 11).toUpperCase
 // it means something is off and we error rather than truncate.
 const MAX_ROWS = 100_000;
 
-export class MapepireBackend implements SourceBackend {
-  readonly transport = "mapepire" as const;
+export class MapepireBackend {
   private job?: InstanceType<typeof SQLJob>;
   private connecting?: Promise<InstanceType<typeof SQLJob>>;
   private chain: Promise<unknown> = Promise.resolve();
