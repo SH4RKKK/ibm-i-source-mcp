@@ -192,10 +192,10 @@ replaying what happened when, with each progress bar collapsed to its final stat
 
 ```
 [search_source: 44.1s, 61 live progress update(s) streamed]
-    0.2s  listing members in MYLIB/SOURCE
-    0.9s  scanning 1200 member(s) in MYLIB/SOURCE for "afdeling"
-   43.8s  scanning SOURCE(MYSRCMBR), 60 match(es) so far (178/1200)
-   44.0s  search for "afdeling" in MYLIB: 60 match(es) across 1200 member(s)
+    0.2s  listing members in MYLIB/QRPGLESRC
+    0.9s  scanning 1200 member(s) in MYLIB/QRPGLESRC for "afdeling"
+   43.8s  scanning QRPGLESRC(MYSRCMBR), 15 match(es) so far (840/1200)
+   44.0s  search for "afdeling" in MYLIB: 15 match(es) across 1200 member(s)
 ```
 
 The progression lands in the transcript even when nothing was rendered live, on failures too (a
