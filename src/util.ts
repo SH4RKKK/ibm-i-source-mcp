@@ -22,13 +22,31 @@ export function likeLiteral(term: string): string {
   return term.replace(/'/g, "''").toUpperCase();
 }
 
-// For a `like '%...%' escape '\'` inside a dynamic statement that is itself a literal inside a
-// compound statement (see searchSource). Both backslashes below are load bearing: drop one and
-// `_` silently becomes a wildcard again. An apostrophe becomes four, one pair per parse level.
-export function nestedLikeNeedle(term: string, caseSensitive = false): string {
-  return (caseSensitive ? term : term.toUpperCase())
-    .replace(/[\\%_]/g, "\\$&")
-    .replace(/'/g, "''''");
+// --- fndstrpdm listing ---
+// Read structurally, never by the English headings, which are translated on another box. srcseq is
+// packed(6,2) and prints without its point, so 400 is line 4.00.
+// ponytail: a record wider than the print area folds and the tail is dropped, not rejoined.
+export function parseFndstrpdm(lines: string[], known: Set<string>, needle: string): { member: string; seqNbr: number; line: string }[] {
+  const out: { member: string; seqNbr: number; line: string }[] = [];
+  const mark = needle.trim().toUpperCase();
+  let member = "";
+  let from = 12, to = 112;
+  for (const raw of lines) {
+    const seq = /^(\s*)(\d+) {2}/.exec(raw);
+    if (seq && seq[1].length + seq[2].length <= 10) {
+      if (member) out.push({ member, seqNbr: Number(seq[2]) / 100, line: raw.slice(from, to).trimEnd() });
+      continue;
+    }
+    if (raw.startsWith(" ")) {
+      if (raw.trim().toUpperCase() === mark) continue;
+      const ruler = /\*[.+\d]{8,}/.exec(raw);
+      if (ruler) { from = ruler.index; to = ruler.index + ruler[0].length; }
+      continue;
+    }
+    const value = raw.split(":")[1]?.trim().split(/\s+/)[0]?.toUpperCase();
+    if (value && known.has(value)) member = value;
+  }
+  return out;
 }
 
 // --- local files ---

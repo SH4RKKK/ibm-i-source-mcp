@@ -42,8 +42,8 @@ export interface SearchMatch {
   sourceFile: string;
   member: string;
   type?: string;
-  seqNbr?: number;               // sequence number of the matching line
-  line?: string;                 // the matching source line
+  seqNbr?: number;
+  line?: string;
 }
 
 export interface SearchResult { matches: SearchMatch[]; truncated: boolean; }
@@ -76,7 +76,7 @@ export interface CompileError { severity: number; line?: number; toLine?: number
 export interface CompileResult {
   command: string;
   success: boolean;
-  listing: string;               // compiler spool listing
+  listing: string;
   messages: string;              // joblog / escape messages
   errors: CompileError[];        // parsed from EVFEVENT (best-effort)
 }

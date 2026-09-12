@@ -137,7 +137,7 @@ All `.env` and `.env.*` files are git-ignored, only `.env.example` is committed.
 - **`list_libraries`**: the libraries on the box with their text descriptions. User libraries by default. `filter` narrows by name or description, `includeSystem` adds the IBM `Q*` libraries.
 - **`list_source_files`**: the source physical files in a library, such as `QRPGLESRC` or `QDDSSRC`, with their descriptions.
 - **`list_members`**: the members in a library with name, type and text description, like browsing in PDM. `filter` matches the name or the description in one query, which is how you find a member by what it does rather than what it is called. `sourceFile` and `memberType` narrow it further.
-- **`search_source`**: greps the code of every member and returns the matching lines with their sequence numbers. The slow one, since it opens and reads each member in turn, so scope it with `sourceFile` or `memberType` and try `list_members` with a filter first. The term is matched literally, so underscores and percent signs are searched for as themselves rather than acting as wildcards.
+- **`search_source`**: greps the code of every member and returns the matching lines with their sequence numbers. Still the slow one, so scope it with `sourceFile` or `memberType` and try `list_members` with a filter first. The term is matched literally, never as a pattern. It runs `fndstrpdm`, so the box needs 5770WDS option 21 (Application Development ToolSet) installed.
 - **`list_servers`**: the IBM i servers you have configured.
 
 ### Read

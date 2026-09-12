@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extFor, nestedLikeNeedle, typeFromPath } from "./util.js";
+import { extFor, parseFndstrpdm, typeFromPath } from "./util.js";
 import { loadProfile } from "./config.js";
-import { MapepireBackend, aliasStmt, memberMetaStmt, qcmdexc, scanBatchValues } from "./mapepire.js";
+import { MapepireBackend, aliasStmt, memberMetaStmt, qcmdexc } from "./mapepire.js";
 import { ToolReporter } from "./report.js";
 import { assertCompileCommandAllowed, buildCompileCommand, buildLibraryListCommands, parseEvfevent } from "./compile.js";
 
@@ -28,12 +28,51 @@ test("extFor uses the member type as the extension", () => {
   assert.equal(extFor(""), ".txt");
 });
 
-test("nestedLikeNeedle escapes like wildcards and survives two levels of quoting", () => {
-  assert.equal(nestedLikeNeedle("afd_in"), "AFD\\_IN");   // literal _, would otherwise match afdxin
-  assert.equal(nestedLikeNeedle("100%"), "100\\%");        // literal %, would otherwise match anything
-  assert.equal(nestedLikeNeedle("a\\b"), "A\\\\B");        // the escape char itself
-  assert.equal(nestedLikeNeedle("o'brien"), "O''''BRIEN"); // four apostrophes, one pair per level
-  assert.equal(nestedLikeNeedle("Afd", true), "Afd");      // case sensitive passes the term through
+test("parseFndstrpdm reads the listing structurally, not by its English headings", () => {
+  const ruler = "    SEQNBR  " + "*...+....1....+....2....+....3....+....4....+....5....+....6....+....7....+....8....+....9....+....100" + " Last Changed Date";
+  const hit = (seq: string, src: string) => seq.padStart(10) + "  " + src.padEnd(108) + "02-06-26";
+  const listing = [
+    "5770WDS V7R6M0  250418 PTHS02          Programming Development Manager      12-09-26  18:00:04     Page     1",
+    "File  . . . . . . . . :   QRPGLESRC",
+    "Member  . . . . . . . :   AFDINFO_FR                     Creation date . . . . . . :   06-02-26",
+    "Type  . . . . . . . . :   RPGLE                          Last changed date . . . . :   06-02-26",
+    "Record length . . . . :   112                            Number of records . . . . :   29",
+    ruler,
+    "            DCL",
+    hit("400", "dcl-f afdin_df workstn;"),
+    hit("1100", "dcl-PI main;"),
+    "_ _ _ _ _   E N D   O F   M E M B E R   _ _ _ _ _",
+    "Member  . . . . . . . :   ZZOTHER                        Creation date . . . . . . :   06-02-26",
+    ruler,
+    hit("250", "dcl-s x char(10);"),
+  ];
+  const known = new Set(["AFDINFO_FR", "ZZOTHER"]);
+  assert.deepEqual(parseFndstrpdm(listing, known, "DCL"), [
+    { member: "AFDINFO_FR", seqNbr: 4, line: "dcl-f afdin_df workstn;" },
+    { member: "AFDINFO_FR", seqNbr: 11, line: "dcl-PI main;" },
+    { member: "ZZOTHER", seqNbr: 2.5, line: "dcl-s x char(10);" },
+  ]);
+  // the change date sits past the ruler window, so it never lands in the source line
+  assert.ok(!parseFndstrpdm(listing, known, "DCL").some((m) => m.line.includes("02-06-26")));
+});
+
+test("parseFndstrpdm does not let a mark line rename the member it is marking", () => {
+  const ruler = "    SEQNBR  " + "*...+....1....+....2" + " Last Changed Date";
+  const listing = [
+    "Member  . . . . . . . :   CALLER",
+    ruler,
+    "            ZZOTHER",
+    "       300  " + "callp zzother();".padEnd(20),
+  ];
+  assert.deepEqual(parseFndstrpdm(listing, new Set(["CALLER", "ZZOTHER"]), "ZZOTHER"),
+    [{ member: "CALLER", seqNbr: 3, line: "callp zzother();" }]);
+});
+
+test("parseFndstrpdm keeps hits out when the member is not in the catalog list", () => {
+  const ruler = "    SEQNBR  " + "*...+....1....+....2" + " Last Changed Date";
+  const listing = ["Member  . . . . . . . :   NOTMINE", ruler, "       100  " + "dcl-s a;".padEnd(20)];
+  assert.deepEqual(parseFndstrpdm(listing, new Set(["OTHER"]), "dcl"), []);
+  assert.deepEqual(parseFndstrpdm([], new Set(["OTHER"]), "dcl"), []);
 });
 
 // --- sql templates ---
@@ -64,11 +103,6 @@ test("memberMetaStmt answers ccsid, length, type, change date and existence in o
   assert.equal((s.match(/select/gi) || []).length, 1, "one statement, not two selects stitched together");
 });
 
-test("scanBatchValues builds the batch member list, quotes doubled", () => {
-  assert.equal(scanBatchValues([{ file: "QRPGLESRC", name: "MYPGM" }, { file: "QDDSSRC", name: "MYSCREEN" }]), "('QRPGLESRC','MYPGM'),('QDDSSRC','MYSCREEN')");
-  assert.equal(scanBatchValues([{ file: "Q'F", name: "M'M" }]), "('Q''F','M''M')");
-  assert.equal(scanBatchValues([]), "");
-});
 
 // --- config ---
 test("loadProfile reads env and applies defaults", () => {

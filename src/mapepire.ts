@@ -2,7 +2,7 @@ import mapepire from "@ibm/mapepire-js";
 import type { CompileError, CompileOpts, CompileResult, LibraryListAction, LibraryListChange, LibraryListEntry, MemberMeta, MemberRef, Profile, Reporter, SearchMatch, SearchOpts, SearchResult } from "./types.js";
 import { NOOP_REPORTER } from "./types.js";
 import { assertCompileCommandAllowed, buildCompileCommand, buildLibraryListCommands, parseEvfevent } from "./compile.js";
-import { likeLiteral, nestedLikeNeedle } from "./util.js";
+import { likeLiteral, parseFndstrpdm } from "./util.js";
 import { closeSshMapepire, connectSshMapepire, raceJobClosed } from "./sshMapepire.js";
 
 const { SQLJob } = mapepire;
@@ -13,7 +13,7 @@ const MAX_ROWS = 100_000;        // single block fetch, no paging: fail rather t
 const SRCSEQ_WHOLE_MAX = 9999;   // srcseq is packed(6,2), so 9999.99 is the ceiling
 
 // shared by every call, which is what serialize() protects. qtemp is private to the job.
-const READ_ALIAS = "MCPREAD", WRITE_ALIAS = "MCPWRITE", EVENT_ALIAS = "MCPEVENT", SCAN_ALIAS = "MCPSCAN";
+const READ_ALIAS = "MCPREAD", WRITE_ALIAS = "MCPWRITE", EVENT_ALIAS = "MCPEVENT";
 
 // --- types ---
 type Row = Record<string, any>;
@@ -54,11 +54,6 @@ export function memberMetaStmt(lib: string, srcf: string, mbr: string): string {
 
 // a real `cl` request costs the mapepire server three statements and blocks the connection
 export const qcmdexc = (command: string) => `call qsys2.qcmdexc('${command.replace(/'/g, "''")}')`;
-
-export function scanBatchValues(members: { file: string; name: string }[]): string {
-  const lit = (s: string) => `'${s.replace(/'/g, "''")}'`;
-  return members.map((m) => `(${lit(m.file)},${lit(m.name)})`).join(",");
-}
 
 // --- backend ---
 export class MapepireBackend {
@@ -140,13 +135,17 @@ export class MapepireBackend {
   }
 
   // --- catalog and library list ---
+  // file_type='S' keeps data files out, not "source_type is not null": a real source member can
+  // have a blank type, and filtering on that hid it entirely.
   private async enumerateMembers(lib: string, srcf?: string, type?: string, filter?: string): Promise<Row[]> {
     const like = filter ? likeLiteral(filter) : undefined;
     return this.sql(`select rtrim(system_table_name) as source_file, rtrim(system_table_member) as name,
               coalesce(rtrim(cast(source_type as varchar(10))), '') as type,
               coalesce(rtrim(varchar(partition_text)), '') as text, number_rows as lines
        from qsys2.syspartitionstat
-       where table_schema = '${lib}' and source_type is not null and trim(system_table_member) <> ''
+       where table_schema = '${lib}' and trim(system_table_member) <> ''
+         and system_table_name in (select system_table_name from qsys2.systables
+                                    where table_schema = '${lib}' and file_type = 'S')
        ${srcf ? `and system_table_name = '${srcf}'` : ""}
        ${type ? `and rtrim(cast(source_type as varchar(10))) = '${type}'` : ""}
        ${like ? `and (upper(system_table_member) like '%${like}%' or upper(partition_text) like '%${like}%')` : ""}
@@ -218,6 +217,7 @@ export class MapepireBackend {
   }
 
   // --- search ---
+  // one fndstrpdm per source file instead of an alias and a scan per member, 20ms down to 1.7ms
   async searchSource(opts: SearchOpts, reporter: Reporter = NOOP_REPORTER): Promise<SearchResult> {
     const lib = validName(opts.library, "library");
     const srcf = opts.sourceFile ? validName(opts.sourceFile, "sourceFile") : undefined;
@@ -225,67 +225,51 @@ export class MapepireBackend {
     const max = opts.maxResults ?? 200;
     const cs = !!opts.caseSensitive;
     const raw = opts.searchTerm;
-    const cmp = cs ? "srcdta" : "upper(srcdta)";
-    const needle = nestedLikeNeedle(raw, cs);
-    const BATCH = 250;
 
     await this.connect(reporter);
     return this.serialize(async () => {
       reporter.step(`listing members in ${lib}${srcf ? `/${srcf}` : ""}`);
       const members = await this.enumerateMembers(lib, srcf, type);
-      reporter.step(`scanning ${members.length} member(s) in ${lib}${srcf ? `/${srcf}` : ""} for "${raw}"`);
-
-      await this.sql(`begin
-        begin declare continue handler for sqlexception begin end;
-          execute immediate 'drop table qtemp.srchits'; end;
-        execute immediate 'create table qtemp.srchits (source_file char(10), name char(10), srcseq decimal(6,2), srcdta varchar(1000))';
-      end`);
-
-      // ponytail: the continue handler skips a failing member silently (damaged, locked, wrong
-      // record format). Write a marker row into srchits if a search ever has to report what it missed.
-      let scanned = 0;
-      for (let off = 0; off < members.length; off += BATCH) {
-        const values = scanBatchValues(members.slice(off, off + BATCH).map((m) => ({ file: String(m.SOURCE_FILE), name: String(m.NAME) })));
-        await this.sql(`begin
-          declare hits int default 0;
-          declare added int default 0;
-          declare continue handler for sqlexception begin end;
-          for c as (select f as source_file, m as name from (values ${values}) t(f, m)) do
-            if hits <= ${max} then
-              execute immediate 'drop alias qtemp.${SCAN_ALIAS}';
-              execute immediate 'create alias qtemp.${SCAN_ALIAS} for ${lib}.'
-                || rtrim(c.source_file) || '(' || rtrim(c.name) || ')';
-              execute immediate 'insert into qtemp.srchits
-                  select ''' || rtrim(c.source_file) || ''', ''' || rtrim(c.name) || ''',
-                         srcseq, cast(srcdta as varchar(1000))
-                    from qtemp.${SCAN_ALIAS}
-                   where ${cmp} like ''%${needle}%'' escape ''\\''
-                   fetch first ${max + 1} rows only';
-              get diagnostics added = row_count;
-              set hits = hits + added;
-            end if;
-          end for;
-        end`);
-
-        scanned = Math.min(off + BATCH, members.length);
-        reporter.bar(`scanned ${scanned} of ${members.length} member(s)`, scanned, members.length);
-        if (scanned < members.length) {
-          const counted = await this.sql(`select count(*) as n from qtemp.srchits`);
-          if (Number(counted[0]?.N ?? 0) > max) break;
-        }
+      // fndstrpdm has no type filter, so the catalog list is what applies memberType
+      const files = new Map<string, Map<string, string>>();
+      for (const m of members) {
+        const f = String(m.SOURCE_FILE);
+        if (!files.has(f)) files.set(f, new Map());
+        files.get(f)!.set(String(m.NAME), String(m.TYPE || ""));
       }
+      reporter.step(`scanning ${members.length} member(s) across ${files.size} source file(s) for "${raw}"`);
 
-      const hits = await this.sql(`select rtrim(source_file) as source_file, rtrim(name) as name, srcseq, srcdta
-         from qtemp.srchits order by source_file, name, srcseq
-         fetch first ${max + 1} rows only`);
+      await this.ensureSpoolTag();
+      await this.dropTaggedSpool();
 
-      const meta = new Map(members.map((m) => [`${m.SOURCE_FILE}(${m.NAME})`, m]));
+      // fndstrpdm always ignores case, so cs filters the superset below and drops the cap with it
+      const cap = cs ? "*ALL" : String(max + 1);
+      const order = [...files.keys()];
+      // every scan first, then one spool read: the round trips cost more than the scan does
+      const scanned: string[] = [];
+      for (const [i, f] of order.entries()) {
+        reporter.bar(`searching ${lib}/${f}`, i, order.length);
+        const r = await this.clResult(
+          `fndstrpdm string('${raw.replace(/'/g, "''")}') file(${lib}/${f}) mbr(*ALL) option(*NONE) prtrcds(${cap})`);
+        if (r?.success === false) reporter.log("warning", `skipped ${lib}/${f}: ${r.error || r.sql_state || "fndstrpdm failed"}`);
+        else scanned.push(f); // a failed scan prints nothing, so it must not shift the pairing
+      }
+      reporter.bar(`reading ${scanned.length} listing(s)`, order.length, order.length);
+      const listings = await this.readTaggedSpool();
+      await this.dropTaggedSpool();
+      if (listings.length !== scanned.length) reporter.log("warning", `${scanned.length} scan(s) but ${listings.length} listing(s), results may be short`);
+
       const matches: SearchMatch[] = [];
       let truncated = false;
-      for (const h of hits) {
-        if (matches.length >= max) { truncated = true; break; }
-        const m = meta.get(`${h.SOURCE_FILE}(${h.NAME})`);
-        matches.push({ library: lib, sourceFile: h.SOURCE_FILE, member: h.NAME, type: (m?.TYPE || "").toLowerCase(), seqNbr: Number(h.SRCSEQ), line: String(h.SRCDTA ?? "").trimEnd() });
+      for (const [i, f] of scanned.entries()) {
+        const known = files.get(f)!;
+        for (const h of parseFndstrpdm(listings[i] ?? [], new Set(known.keys()), raw)) {
+          if (cs && !h.line.includes(raw)) continue;
+          if (matches.length >= max) { truncated = true; break; }
+          matches.push({ library: lib, sourceFile: f, member: h.member, type: (known.get(h.member) || "").toLowerCase(),
+            seqNbr: h.seqNbr, line: h.line });
+        }
+        if (truncated) break;
       }
       reporter.log("info", `search for "${raw}" in ${lib}: ${matches.length} match(es) across ${members.length} member(s)${truncated ? " (truncated at maxResults)" : ""}`);
       return { matches, truncated };
@@ -340,31 +324,52 @@ export class MapepireBackend {
       );
 
       reporter.log("info", `${created ? "filling the new" : "replacing the content of"} ${lib}/${srcf}(${mbr}) with ${lines.length} lines`);
-      const CHUNK = 1000; // a 2D parameter array becomes one addBatch, so a chunk is one round trip
-      let written = 0;
+      // the whole member is one addToBatch, so one round trip: 30000 lines (2.3MB) lands in 1.4s
+      reporter.step(`uploading ${lines.length} lines to ${mbr}`);
       try {
-        for (let i = 0; i < lines.length; i += CHUNK) {
-          const rows = lines.slice(i, i + CHUNK).map((l, j) => [scale ? (i + j + 1) / 100 : i + j + 1, 0, l]);
-          await this.sql(`insert into qtemp.${WRITE_ALIAS} (srcseq, srcdat, srcdta) values (?, ?, ?)`, rows);
-          written = Math.min(i + CHUNK, lines.length);
-          reporter.bar(`uploading ${mbr}: ${written}/${lines.length} lines`, written, lines.length);
-        }
+        await this.sql(`insert into qtemp.${WRITE_ALIAS} (srcseq, srcdat, srcdta) values (?, ?, ?)`,
+          lines.map((l, i) => [scale ? (i + 1) / 100 : i + 1, 0, l]));
       } catch (e: any) {
-        const state = created ? `${lib}/${srcf}(${mbr}) was created and is empty` : `${lib}/${srcf}(${mbr}) was cleared and is now incomplete`;
-        throw new Error(`upload stopped at ${written}/${lines.length} lines, ${state}, upload again once the problem is fixed: ${e.message}`);
+        const state = created ? `${lib}/${srcf}(${mbr}) was created and is empty` : `${lib}/${srcf}(${mbr}) was cleared and may be incomplete`;
+        throw new Error(`upload of ${lines.length} lines failed, ${state}, upload again once the problem is fixed: ${e.message}`);
       }
       reporter.log("info", `uploaded ${lines.length} lines to ${lib}/${srcf}(${mbr})${warnings.length ? ` (${warnings.length} truncated line(s))` : ""}`);
       return { warnings, created };
     });
   }
 
-  // --- compile ---
+  // --- spool ---
+  // job scoped and touches nothing of the user's, so search still runs under IBMI_READ_ONLY
   private async ensureSpoolTag(): Promise<void> {
     if (this.spoolReady) return;
     this.splfTag = "MCP" + Math.random().toString(36).slice(2, 9).toUpperCase();
     await this.sql(qcmdexc(`ovrprtf file(*prtf) spool(*yes) hold(*yes) usrdta('${this.splfTag}') splfown(*curusrprf) ovrscope(*job)`));
     this.spoolReady = true;
   }
+
+  private async readTaggedSpool(): Promise<string[][]> {
+    const files = await this.sql(`select rtrim(spooled_file_name) as name, spooled_file_number as nbr,
+            rtrim(qualified_job_name) as job
+       from table(qsys2.spooled_file_info(user_data => '${this.splfTag}', status => '*HELD'))
+       order by nbr`);
+    const out: string[][] = [];
+    for (const f of files) {
+      const rows = await this.sql(`select spooled_data from table(systools.spooled_file_data(
+            job_name => '${f.JOB}', spooled_file_name => '${f.NAME}', spooled_file_number => '${f.NBR}'))
+          order by ordinal_position`);
+      out.push(rows.map((r) => String(r.SPOOLED_DATA ?? "")));
+    }
+    return out;
+  }
+
+  // the exception to assertCompileCommandAllowed refusing dlt*: never from input, and
+  // select(*current *all *all <tag>) reaches only what this job printed.
+  private async dropTaggedSpool(): Promise<void> {
+    if (!this.splfTag) return;
+    await this.sql(qcmdexc(`dltsplf file(*select) select(*current *all *all ${this.splfTag})`)).catch(() => {});
+  }
+
+  // --- compile ---
 
   private async readEvents(lib: string, obj: string): Promise<CompileError[]> {
     await this.sql(aliasStmt(EVENT_ALIAS, lib, "EVFEVENT", obj));
@@ -396,16 +401,7 @@ export class MapepireBackend {
 
       let listing = "";
       try {
-        const splfs = await this.sql(`select qualified_job_name, spooled_file_name, spooled_file_number
-             from table(qsys2.spooled_file_info(user_data => '${this.splfTag}', status => '*HELD'))`);
-        const parts: string[] = [];
-        for (const s of splfs) {
-          const rows = await this.sql(`select spooled_data from table(systools.spooled_file_data(
-                job_name => '${s.QUALIFIED_JOB_NAME}', spooled_file_name => '${s.SPOOLED_FILE_NAME}',
-                spooled_file_number => '${s.SPOOLED_FILE_NUMBER}')) order by ordinal_position`);
-          parts.push(rows.map((r) => String(r.SPOOLED_DATA ?? "").replace(/\s+$/, "")).join("\n"));
-        }
-        listing = parts.join("\n");
+        listing = (await this.readTaggedSpool()).flat().map((l) => l.replace(/\s+$/, "")).join("\n");
       } catch (e: any) {
         listing = `(could not read spool: ${e.message})`;
       }
@@ -416,7 +412,7 @@ export class MapepireBackend {
         errors = await this.readEvents(tgtlib, name).catch(() => []);
       } else listing += "\n\n(pass an explicit targetLibrary for structured EVFEVENT errors)";
 
-      await this.sql(qcmdexc(`dltsplf file(*select) select(*current *all *all ${this.splfTag})`)).catch(() => {});
+      await this.dropTaggedSpool();
       const messages = result?.error ? `[${result.sql_state ?? ""}] ${result.error}` : "";
       reporter.log(success ? "info" : "error", `compile ${mbr}: ${success ? "SUCCESS" : "FAILED"} (${errors.length} evfevent record(s))`);
       return { command, success, listing, messages, errors };
