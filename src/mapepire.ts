@@ -2,14 +2,24 @@ import mapepire from "@ibm/mapepire-js";
 import type { CompileError, CompileOpts, CompileResult, LibraryListAction, LibraryListChange, LibraryListEntry, MemberMeta, MemberRef, Profile, Reporter, SearchMatch, SearchOpts, SearchResult } from "./types.js";
 import { NOOP_REPORTER } from "./types.js";
 import { assertCompileCommandAllowed, buildCompileCommand, buildLibraryListCommands, parseEvfevent } from "./compile.js";
-import { textContains } from "./util.js";
+import { likeLiteral, nestedLikeNeedle } from "./util.js";
 import { closeSshMapepire, connectSshMapepire, raceJobClosed } from "./sshMapepire.js";
 
 const { SQLJob } = mapepire;
 
-// IBM i object/member name: letter or national first, up to 10 chars.
-// This is the trust boundary for values we splice into CL/SQL, so it stays strict.
-const NAME = /^[A-Za-z#$@][A-Za-z0-9#$@_.]{0,9}$/;
+// --- constants ---
+const NAME = /^[A-Za-z#$@][A-Za-z0-9#$@_.]{0,9}$/; // trust boundary: spliced into SQL and CL, never bound
+const MAX_ROWS = 100_000;        // single block fetch, no paging: fail rather than truncate
+const SRCSEQ_WHOLE_MAX = 9999;   // srcseq is packed(6,2), so 9999.99 is the ceiling
+
+// shared by every call, which is what serialize() protects. qtemp is private to the job.
+const READ_ALIAS = "MCPREAD", WRITE_ALIAS = "MCPWRITE", EVENT_ALIAS = "MCPEVENT", SCAN_ALIAS = "MCPSCAN";
+
+// --- types ---
+type Row = Record<string, any>;
+interface MemberMetaRow { ccsid: number; length: number; type: string; changed?: string; exists: boolean }
+
+// --- validators ---
 function validName(v: string, what: string): string {
   if (!NAME.test(v)) throw new Error(`invalid ${what}: "${v}"`);
   return v.toUpperCase();
@@ -18,36 +28,55 @@ function validLibOrStar(v: string, what: string): string {
   if (/^\*[a-z]+$/i.test(v)) return v.toUpperCase(); // *curlib, *libl
   return validName(v, what);
 }
+const refNames = (r: MemberRef) => ({ lib: validName(r.library, "library"), srcf: validName(r.sourceFile, "sourceFile"), mbr: validName(r.member, "member") });
 
-type Row = Record<string, any>;
-const randOver = () => "O" + Math.random().toString(36).slice(2, 11).toUpperCase();
+// --- sql templates ---
+// an alias is the only way to address one member from SQL
+export function aliasStmt(alias: string, lib: string, srcf: string, mbr: string, then?: string): string {
+  return `begin
+    begin declare continue handler for sqlexception begin end;
+      execute immediate 'drop alias qtemp.${alias}'; end;
+    execute immediate 'create alias qtemp.${alias} for ${lib}.${srcf}(${mbr})';
+    ${then ? `${then};` : ""}
+  end`;
+}
 
-// Single block fetch, no paging. Far past any real member or list, so hitting
-// it means something is off and we error rather than truncate.
-const MAX_ROWS = 100_000;
+// left join: a missing member still returns the file's row, which is the exists check
+export function memberMetaStmt(lib: string, srcf: string, mbr: string): string {
+  return `select c.ccsid, c.length, rtrim(cast(p.source_type as varchar(10))) as source_type,
+            varchar_format(p.last_source_update_timestamp,'YYYY-MM-DD HH24:MI:SS') as changed,
+            p.system_table_member as found
+     from qsys2.syscolumns c
+     left join qsys2.syspartitionstat p on p.table_schema = c.table_schema
+      and p.table_name = c.table_name and p.system_table_member = '${mbr}'
+    where c.table_schema='${lib}' and c.table_name='${srcf}' and c.column_name='SRCDTA'`;
+}
 
+// a real `cl` request costs the mapepire server three statements and blocks the connection
+export const qcmdexc = (command: string) => `call qsys2.qcmdexc('${command.replace(/'/g, "''")}')`;
+
+export function scanBatchValues(members: { file: string; name: string }[]): string {
+  const lit = (s: string) => `'${s.replace(/'/g, "''")}'`;
+  return members.map((m) => `(${lit(m.file)},${lit(m.name)})`).join(",");
+}
+
+// --- backend ---
 export class MapepireBackend {
   private job?: InstanceType<typeof SQLJob>;
   private connecting?: Promise<InstanceType<typeof SQLJob>>;
   private chain: Promise<unknown> = Promise.resolve();
-  private splfTag?: string;      // USRDTA tag stamped on the job's spooled files
+  private splfTag?: string;      // usrdta tag stamped on this job's spooled files
   private spoolReady = false;
 
   constructor(private profile: Profile) {}
 
-  // One serialized job: ovrdbf is job scoped, so its select and dltovr must run
-  // on the same job uninterleaved. Add a pool only if it ever matters.
+  // --- job plumbing ---
   private serialize<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.chain.then(fn, fn);
     this.chain = run.then(() => {}, () => {});
     return run;
   }
 
-  // SSH in and run the jar in --single mode (see sshMapepire.ts). The SQLJob and
-  // its query engine are unchanged, only the socket under it is an SSH stream.
-  // A job whose socket closed (box rebooted, vpn dropped) is discarded and a
-  // fresh connection is made, instead of hanging on the dead one. Concurrent
-  // callers share one connect attempt via the memoized promise.
   private async connect(reporter: Reporter = NOOP_REPORTER): Promise<InstanceType<typeof SQLJob>> {
     if (this.job && (this.job as any).status !== "ended") return this.job;
     if (!this.connecting) {
@@ -67,19 +96,15 @@ export class MapepireBackend {
     const q = (job as any).query(statement, parameters ? { parameters } : undefined);
     const rs: any = await raceJobClosed(job, q.execute(MAX_ROWS));
     await q.close?.();
-    // No paging: if the server says it is not done, there were more than MAX_ROWS
-    // rows. Fail loudly rather than hand back a truncated member or member list.
-    if (rs.has_results && rs.is_done === false) {
-      throw new Error(`result exceeded ${MAX_ROWS} rows and would be truncated, narrow the request`);
-    }
+    // not done means there were more rows than MAX_ROWS
+    if (rs.has_results && rs.is_done === false) throw new Error(`result exceeded ${MAX_ROWS} rows and would be truncated, narrow the request`);
     return rs.has_results ? (rs.data as Row[]) : [];
   }
 
-  private async cl(command: string): Promise<void> {
-    await this.clResult(command);
+  private async runOrThrow(statement: string, what: string): Promise<void> {
+    try { await this.sql(statement); } catch (e: any) { throw new Error(`${what} failed: ${e?.message || e}`); }
   }
 
-  // Like cl() but returns the mapepire CLCommandResult ({success, sql_state, error, joblog}).
   private async clResult(command: string): Promise<any> {
     const job = await this.connect();
     const q = (job as any).query(command, { isClCommand: true });
@@ -88,104 +113,66 @@ export class MapepireBackend {
     return rs;
   }
 
+  // --- read ---
   async readMember(ref: MemberRef, reporter: Reporter = NOOP_REPORTER): Promise<{ content: string; meta: MemberMeta }> {
-    const lib = validName(ref.library, "library");
-    const srcf = validName(ref.sourceFile, "sourceFile");
-    const mbr = validName(ref.member, "member");
+    const { lib, srcf, mbr } = refNames(ref);
     await this.connect(reporter);
     return this.serialize(async () => {
       reporter.step(`reading ${lib}/${srcf}(${mbr})`);
-      const over = randOver();
-      await this.cl(`ovrdbf file(${over}) tofile(${lib}/${srcf}) mbr(${mbr}) ovrscope(*job)`);
-      try {
-        const col = (await this.sql(
-          `select ccsid, length from qsys2.syscolumns where table_schema='${lib}' and table_name='${srcf}' and column_name='SRCDTA'`,
-        ))[0];
-        const ccsid = Number(col?.CCSID ?? this.profile.sourceFileCcsid);
-        const len = Number(col?.LENGTH ?? 80);
-        // ccsid 65535 means no conversion, so cast to sourceFileCcsid (default 37).
-        const srcdta = ccsid === 65535 ? `cast(srcdta as varchar(${len}) ccsid ${this.profile.sourceFileCcsid}) as srcdta` : "srcdta";
-        const rows = await this.sql(`select ${srcdta} from ${over}`);
-        const content = rows.map((r) => r.SRCDTA ?? "").join("\n");
-        reporter.step(`downloaded ${rows.length} lines from ${lib}/${srcf}(${mbr})`);
-        const info = await this.memberInfo(lib, srcf, mbr);
-        return {
-          content,
-          meta: { type: info.type, ccsid, recordLength: len, lineCount: rows.length, lastChanged: info.changed },
-        };
-      } finally {
-        await this.cl(`dltovr file(${over}) lvl(*job)`).catch(() => {});
-      }
+      const [meta] = await Promise.all([this.memberMeta(lib, srcf, mbr, true), this.sql(aliasStmt(READ_ALIAS, lib, srcf, mbr))]);
+      // ccsid 65535 means no conversion, so cast to sourceFileCcsid (default 37)
+      const srcdta = meta.ccsid === 65535 ? `cast(srcdta as varchar(${meta.length}) ccsid ${this.profile.sourceFileCcsid}) as srcdta` : "srcdta";
+      const rows = await this.sql(`select ${srcdta} from qtemp.${READ_ALIAS}`);
+      reporter.step(`downloaded ${rows.length} lines from ${lib}/${srcf}(${mbr})`);
+      return {
+        content: rows.map((r) => r.SRCDTA ?? "").join("\n"),
+        meta: { type: meta.type, ccsid: meta.ccsid, lineCount: rows.length, lastChanged: meta.changed },
+      };
     });
   }
 
-  // Best-effort metadata; a hiccup here must not fail the source read.
-  private async memberInfo(lib: string, srcf: string, mbr: string): Promise<{ type: string; changed?: string }> {
-    try {
-      const r = (await this.sql(
-        `select rtrim(source_type) as source_type,
-                varchar_format(last_source_update_timestamp,'YYYY-MM-DD HH24:MI:SS') as changed
-         from qsys2.syspartitionstat
-         where table_schema='${lib}' and table_name='${srcf}' and system_table_member='${mbr}'`,
-      ))[0];
-      return { type: (r?.SOURCE_TYPE || "txt").toLowerCase(), changed: r?.CHANGED };
-    } catch {
-      return { type: "txt" };
-    }
+  // soft: read path only. On upload a thrown query reads as exists:false, and create:true addpfms over a live member.
+  private async memberMeta(lib: string, srcf: string, mbr: string, soft = false): Promise<MemberMetaRow> {
+    let r: Row | undefined;
+    try { r = (await this.sql(memberMetaStmt(lib, srcf, mbr)))[0]; } catch (e) { if (!soft) throw e; }
+    return { ccsid: Number(r?.CCSID ?? this.profile.sourceFileCcsid), length: Number(r?.LENGTH ?? 80),
+      type: (r?.SOURCE_TYPE || "txt").toLowerCase(), changed: r?.CHANGED ?? undefined, exists: r?.FOUND != null };
   }
 
-  // Source members via object_statistics + a lateral partition_statistics call,
-  // like Code for IBM i's getMemberList. source_type not null keeps it to real
-  // source members (data PF rows have no SRCDTA to scan).
-  private async enumerateMembers(lib: string, srcf?: string, type?: string): Promise<Row[]> {
-    const objName = srcf ?? "*ALL";
-    return this.sql(
-      `select rtrim(o.objname) as source_file, rtrim(p.system_table_member) as name,
-              coalesce(rtrim(cast(p.source_type as varchar(10))), '') as type,
-              coalesce(rtrim(varchar(p.text)), '') as text,
-              p.number_rows as lines
-       from table(qsys2.object_statistics('${lib}', '*FILE', '${objName}')) o,
-            lateral (select * from table(qsys2.partition_statistics(rpad(o.objlib, 10), rpad(o.objname, 10)))) p
-       where trim(p.system_table_member) <> '' and p.source_type is not null
-       ${type ? `and rtrim(cast(p.source_type as varchar(10))) = '${type}'` : ""}
-       order by source_file, name`,
-    );
+  // --- catalog and library list ---
+  private async enumerateMembers(lib: string, srcf?: string, type?: string, filter?: string): Promise<Row[]> {
+    const like = filter ? likeLiteral(filter) : undefined;
+    return this.sql(`select rtrim(system_table_name) as source_file, rtrim(system_table_member) as name,
+              coalesce(rtrim(cast(source_type as varchar(10))), '') as type,
+              coalesce(rtrim(varchar(partition_text)), '') as text, number_rows as lines
+       from qsys2.syspartitionstat
+       where table_schema = '${lib}' and source_type is not null and trim(system_table_member) <> ''
+       ${srcf ? `and system_table_name = '${srcf}'` : ""}
+       ${type ? `and rtrim(cast(source_type as varchar(10))) = '${type}'` : ""}
+       ${like ? `and (upper(system_table_member) like '%${like}%' or upper(partition_text) like '%${like}%')` : ""}
+       order by source_file, name`);
   }
 
-  // List libraries via object_statistics. The scope value *ALLUSR returns user
-  // libraries (where source lives), *ALL adds the IBM Q* system libraries. An
-  // optional filter narrows by a substring of the name or description, so an
-  // agent can home in on where source lives without dumping the whole system.
   async listLibraries(filter?: string, includeSystem = false, reporter: Reporter = NOOP_REPORTER): Promise<{ name: string; text: string }[]> {
-    const scope = includeSystem ? "*ALL" : "*ALLUSR";
+    const scope = includeSystem ? "*ALL" : "*ALLUSR"; // *ALLUSR is user libraries, where source lives
     const f = filter?.trim();
-    const like = f ? f.replace(/'/g, "''").toUpperCase() : undefined; // for the LIKE literal
+    const like = f ? likeLiteral(f) : undefined;
     const where = like ? `where upper(objname) like '%${like}%' or upper(objtext) like '%${like}%'` : "";
     await this.connect(reporter);
     reporter.step(`listing ${includeSystem ? "all" : "user"} libraries${f ? ` matching "${f}"` : ""}, a full scan can take a moment`);
-    const rows = await this.sql(
-      `select rtrim(objname) as name, coalesce(rtrim(objtext), '') as text
+    const rows = await this.sql(`select rtrim(objname) as name, coalesce(rtrim(objtext), '') as text
        from table(qsys2.object_statistics('${scope}', '*LIB')) ${where}
-       order by name`,
-    );
+       order by name`);
     return rows.map((r) => ({ name: r.NAME, text: r.TEXT }));
   }
 
-  // The connection's library list (SYSTEM / PRODUCT / CURRENT / USER portions),
-  // in search order. Read-only, so no serialize needed.
   async readLibraryList(reporter: Reporter = NOOP_REPORTER): Promise<LibraryListEntry[]> {
     await this.connect(reporter);
     reporter.step("reading the library list");
-    const rows = await this.sql(
-      `select type, rtrim(system_schema_name) as lib from qsys2.library_list_info order by ordinal_position`,
-    );
+    const rows = await this.sql(`select type, rtrim(system_schema_name) as lib from qsys2.library_list_info order by ordinal_position`);
     return rows.map((r) => ({ portion: String(r.TYPE), library: r.LIB }));
   }
 
-  // Change the job's library list for this session: addlible / rmvlible /
-  // chgcurlib / chglibl. Session scoped and non-destructive (it never touches
-  // objects), but it does affect later compiles, so it runs on the serialized job.
-  // Names go through validName first, the trust boundary. Returns the new list.
   async changeLibraryList(action: LibraryListAction, change: LibraryListChange, reporter: Reporter = NOOP_REPORTER): Promise<LibraryListEntry[]> {
     if (this.profile.readOnly) throw new Error("read-only mode (IBMI_READ_ONLY): changing the library list is disabled");
     const args: LibraryListChange = { position: change.position };
@@ -214,26 +201,23 @@ export class MapepireBackend {
     const lib = validName(library, "library");
     await this.connect(reporter);
     reporter.step(`listing source files in ${lib}`);
-    const rows = await this.sql(
-      `select rtrim(system_table_name) as name, coalesce(rtrim(table_text), '') as text
-       from qsys2.systables where table_schema='${lib}' and file_type='S' order by name`,
-    );
+    const rows = await this.sql(`select rtrim(system_table_name) as name, coalesce(rtrim(table_text), '') as text
+       from qsys2.systables where table_schema='${lib}' and file_type='S' order by name`);
     return rows.map((r) => ({ name: r.NAME, text: r.TEXT }));
   }
 
-  async listMembers(library: string, sourceFile?: string, memberType?: string, reporter: Reporter = NOOP_REPORTER) {
+  async listMembers(library: string, sourceFile?: string, memberType?: string, filter?: string, reporter: Reporter = NOOP_REPORTER) {
     const lib = validName(library, "library");
     const srcf = sourceFile ? validName(sourceFile, "sourceFile") : undefined;
     const type = memberType ? validName(memberType, "memberType") : undefined;
+    const f = filter?.trim() || undefined;
     await this.connect(reporter);
-    reporter.step(`listing members in ${lib}${srcf ? `/${srcf}` : " (all source files)"}`);
-    const rows = await this.serialize(() => this.enumerateMembers(lib, srcf, type));
+    reporter.step(`listing members in ${lib}${srcf ? `/${srcf}` : " (all source files)"}${f ? ` matching "${f}"` : ""}`);
+    const rows = await this.enumerateMembers(lib, srcf, type, f);
     return rows.map((r) => ({ sourceFile: r.SOURCE_FILE, name: r.NAME, type: (r.TYPE || "").toLowerCase(), text: r.TEXT || "", lines: Number(r.LINES) || undefined }));
   }
 
-  // Discovery search: a member surfaces if the term is in its name, its text
-  // description, or its code, so a purpose word can match even when it never
-  // appears in the source itself.
+  // --- search ---
   async searchSource(opts: SearchOpts, reporter: Reporter = NOOP_REPORTER): Promise<SearchResult> {
     const lib = validName(opts.library, "library");
     const srcf = opts.sourceFile ? validName(opts.sourceFile, "sourceFile") : undefined;
@@ -241,54 +225,104 @@ export class MapepireBackend {
     const max = opts.maxResults ?? 200;
     const cs = !!opts.caseSensitive;
     const raw = opts.searchTerm;
-    const needle = (cs ? raw : raw.toUpperCase()).replace(/'/g, "''"); // for the LIKE literal
     const cmp = cs ? "srcdta" : "upper(srcdta)";
+    const needle = nestedLikeNeedle(raw, cs);
+    const BATCH = 250;
 
     await this.connect(reporter);
     return this.serialize(async () => {
       reporter.step(`listing members in ${lib}${srcf ? `/${srcf}` : ""}`);
       const members = await this.enumerateMembers(lib, srcf, type);
       reporter.step(`scanning ${members.length} member(s) in ${lib}${srcf ? `/${srcf}` : ""} for "${raw}"`);
+
+      await this.sql(`begin
+        begin declare continue handler for sqlexception begin end;
+          execute immediate 'drop table qtemp.srchits'; end;
+        execute immediate 'create table qtemp.srchits (source_file char(10), name char(10), srcseq decimal(6,2), srcdta varchar(1000))';
+      end`);
+
+      // ponytail: the continue handler skips a failing member silently (damaged, locked, wrong
+      // record format). Write a marker row into srchits if a search ever has to report what it missed.
+      let scanned = 0;
+      for (let off = 0; off < members.length; off += BATCH) {
+        const values = scanBatchValues(members.slice(off, off + BATCH).map((m) => ({ file: String(m.SOURCE_FILE), name: String(m.NAME) })));
+        await this.sql(`begin
+          declare hits int default 0;
+          declare added int default 0;
+          declare continue handler for sqlexception begin end;
+          for c as (select f as source_file, m as name from (values ${values}) t(f, m)) do
+            if hits <= ${max} then
+              execute immediate 'drop alias qtemp.${SCAN_ALIAS}';
+              execute immediate 'create alias qtemp.${SCAN_ALIAS} for ${lib}.'
+                || rtrim(c.source_file) || '(' || rtrim(c.name) || ')';
+              execute immediate 'insert into qtemp.srchits
+                  select ''' || rtrim(c.source_file) || ''', ''' || rtrim(c.name) || ''',
+                         srcseq, cast(srcdta as varchar(1000))
+                    from qtemp.${SCAN_ALIAS}
+                   where ${cmp} like ''%${needle}%'' escape ''\\''
+                   fetch first ${max + 1} rows only';
+              get diagnostics added = row_count;
+              set hits = hits + added;
+            end if;
+          end for;
+        end`);
+
+        scanned = Math.min(off + BATCH, members.length);
+        reporter.bar(`scanned ${scanned} of ${members.length} member(s)`, scanned, members.length);
+        if (scanned < members.length) {
+          const counted = await this.sql(`select count(*) as n from qtemp.srchits`);
+          if (Number(counted[0]?.N ?? 0) > max) break;
+        }
+      }
+
+      const hits = await this.sql(`select rtrim(source_file) as source_file, rtrim(name) as name, srcseq, srcdta
+         from qtemp.srchits order by source_file, name, srcseq
+         fetch first ${max + 1} rows only`);
+
+      const meta = new Map(members.map((m) => [`${m.SOURCE_FILE}(${m.NAME})`, m]));
       const matches: SearchMatch[] = [];
       let truncated = false;
-      const add = (m: SearchMatch) => { if (matches.length >= max) { truncated = true; return false; } matches.push(m); return true; };
-
-      outer: for (const [idx, m] of members.entries()) {
-        const file = m.SOURCE_FILE, name = m.NAME, mtype = (m.TYPE || "").toLowerCase(), text = m.TEXT || "";
-        reporter.bar(`scanning ${file}(${name}), ${matches.length} match(es) so far`, idx + 1, members.length);
-        if (textContains(name, raw, cs) && !add({ library: lib, sourceFile: file, member: name, type: mtype, text, matchedOn: "name" })) break;
-        if (textContains(text, raw, cs) && !add({ library: lib, sourceFile: file, member: name, type: mtype, text, matchedOn: "text" })) break;
-        // content scan (source members only, so SRCDTA exists)
-        const over = randOver();
-        await this.cl(`ovrdbf file(${over}) tofile(${lib}/${file}) mbr(${name}) ovrscope(*job)`);
-        try {
-          const hits = await this.sql(`select srcseq, srcdta from ${over} where ${cmp} like '%${needle}%'`);
-          for (const h of hits) {
-            if (!add({ library: lib, sourceFile: file, member: name, type: mtype, text, matchedOn: "code", seqNbr: Number(h.SRCSEQ), line: String(h.SRCDTA ?? "").trimEnd() })) break outer;
-          }
-        } finally {
-          await this.cl(`dltovr file(${over}) lvl(*job)`).catch(() => {});
-        }
+      for (const h of hits) {
+        if (matches.length >= max) { truncated = true; break; }
+        const m = meta.get(`${h.SOURCE_FILE}(${h.NAME})`);
+        matches.push({ library: lib, sourceFile: h.SOURCE_FILE, member: h.NAME, type: (m?.TYPE || "").toLowerCase(), seqNbr: Number(h.SRCSEQ), line: String(h.SRCDTA ?? "").trimEnd() });
       }
       reporter.log("info", `search for "${raw}" in ${lib}: ${matches.length} match(es) across ${members.length} member(s)${truncated ? " (truncated at maxResults)" : ""}`);
       return { matches, truncated };
     });
   }
 
-  // Write local text back into the member: clrpfm + chunked insert through the
-  // same ovrdbf alias the read path uses. No SFTP needed.
-  async writeMember(ref: MemberRef, content: string, reporter: Reporter = NOOP_REPORTER): Promise<{ warnings: string[] }> {
+  // --- write ---
+  async writeMember(
+    ref: MemberRef,
+    content: string,
+    reporter: Reporter = NOOP_REPORTER,
+    opts: { create?: boolean; memberType?: string; text?: string } = {},
+  ): Promise<{ warnings: string[]; created: boolean }> {
     if (this.profile.readOnly) throw new Error("read-only mode (IBMI_READ_ONLY): upload is disabled");
-    const lib = validName(ref.library, "library");
-    const srcf = validName(ref.sourceFile, "sourceFile");
-    const mbr = validName(ref.member, "member");
+    const { lib, srcf, mbr } = refNames(ref);
     await this.connect(reporter);
     return this.serialize(async () => {
-      reporter.step(`checking the record length of ${lib}/${srcf}`);
-      const col = (await this.sql(
-        `select length from qsys2.syscolumns where table_schema='${lib}' and table_name='${srcf}' and column_name='SRCDTA'`,
-      ))[0];
-      const len = Number(col?.LENGTH ?? 80);
+      reporter.step(`checking ${lib}/${srcf}(${mbr})`);
+      const meta = await this.memberMeta(lib, srcf, mbr); // nothing is touched until this passes
+      let created = false;
+      if (!meta.exists) {
+        if (!opts.create) throw new Error(
+          `${lib}/${srcf}(${mbr}) does not exist, so there is nothing to upload into. ` +
+          `Nothing was changed on the IBM i. To add it, call upload_source_member again with ` +
+          `create: true (that runs addpfm), and pass memberType if it cannot be taken from the ` +
+          `local file's extension.`);
+        const type = validName((opts.memberType ?? "").trim(), "memberType");
+        const desc = (opts.text ?? "").replace(/\s+/g, " ").trim().slice(0, 50).replace(/'/g, "''");
+        reporter.step(`creating member ${mbr} with srctype(${type})`);
+        await this.runOrThrow(
+          qcmdexc(`addpfm file(${lib}/${srcf}) mbr(${mbr}) srctype(${type})${desc ? ` text('${desc}')` : ""}`),
+          `creating member ${lib}/${srcf}(${mbr})`,
+        );
+        reporter.log("info", `created ${lib}/${srcf}(${mbr}) as srctype ${type}`);
+        created = true;
+      }
+      const len = meta.length;
       const raw = content.replace(/\r\n/g, "\n").split("\n");
       if (raw.length && raw[raw.length - 1] === "") raw.pop(); // trailing newline
       const warnings: string[] = [];
@@ -297,79 +331,63 @@ export class MapepireBackend {
         return l;
       });
       if (warnings.length) reporter.log("warning", `${warnings.length} line(s) are longer than the ${len}-char record length and will be truncated`);
-      const scale = lines.length >= 10000; // SRCSEQ is packed(6,2), max 9999.99
-      const over = randOver();
-      await this.cl(`ovrdbf file(${over}) tofile(${lib}/${srcf}) mbr(${mbr}) ovrscope(*job)`);
+      const scale = lines.length > SRCSEQ_WHOLE_MAX;
+
+      reporter.step(created ? `preparing the new member ${mbr}` : `clearing ${mbr} (clrpfm) before the upload`);
+      await this.runOrThrow(
+        aliasStmt(WRITE_ALIAS, lib, srcf, mbr, created ? undefined : qcmdexc(`clrpfm file(${lib}/${srcf}) mbr(${mbr})`)),
+        `preparing ${lib}/${srcf}(${mbr}) for upload (nothing was changed)`,
+      );
+
+      reporter.log("info", `${created ? "filling the new" : "replacing the content of"} ${lib}/${srcf}(${mbr}) with ${lines.length} lines`);
+      const CHUNK = 1000; // a 2D parameter array becomes one addBatch, so a chunk is one round trip
+      let written = 0;
       try {
-        reporter.log("info", `replacing the content of ${lib}/${srcf}(${mbr}) with ${lines.length} lines`);
-        reporter.step(`clearing ${mbr} (clrpfm) before the upload`);
-        await this.cl(`clrpfm file(${lib}/${srcf}) mbr(${mbr})`);
-        const CHUNK = 500; // keep each insert well under the ~400KB statement limit
-        let written = 0;
-        try {
-          for (let i = 0; i < lines.length; i += CHUNK) {
-            const vals = lines.slice(i, i + CHUNK).map((l, j) => {
-              const n = i + j + 1;
-              const seq = scale ? (n / 100).toFixed(2) : String(n);
-              return `(${seq}, 0, '${l.replace(/'/g, "''")}')`;
-            }).join(",");
-            await this.sql(`insert into ${over} (srcseq, srcdat, srcdta) values ${vals}`);
-            written = Math.min(i + CHUNK, lines.length);
-            reporter.bar(`uploading ${mbr}: ${written}/${lines.length} lines`, written, lines.length);
-          }
-        } catch (e: any) {
-          // The member was already cleared, so a failure here leaves it incomplete.
-          throw new Error(`upload stopped at ${written}/${lines.length} lines, ${lib}/${srcf}(${mbr}) is incomplete, upload again once the problem is fixed: ${e.message}`);
+        for (let i = 0; i < lines.length; i += CHUNK) {
+          const rows = lines.slice(i, i + CHUNK).map((l, j) => [scale ? (i + j + 1) / 100 : i + j + 1, 0, l]);
+          await this.sql(`insert into qtemp.${WRITE_ALIAS} (srcseq, srcdat, srcdta) values (?, ?, ?)`, rows);
+          written = Math.min(i + CHUNK, lines.length);
+          reporter.bar(`uploading ${mbr}: ${written}/${lines.length} lines`, written, lines.length);
         }
-        reporter.log("info", `uploaded ${lines.length} lines to ${lib}/${srcf}(${mbr})${warnings.length ? ` (${warnings.length} truncated line(s))` : ""}`);
-        return { warnings };
-      } finally {
-        await this.cl(`dltovr file(${over}) lvl(*job)`).catch(() => {});
+      } catch (e: any) {
+        const state = created ? `${lib}/${srcf}(${mbr}) was created and is empty` : `${lib}/${srcf}(${mbr}) was cleared and is now incomplete`;
+        throw new Error(`upload stopped at ${written}/${lines.length} lines, ${state}, upload again once the problem is fixed: ${e.message}`);
       }
+      reporter.log("info", `uploaded ${lines.length} lines to ${lib}/${srcf}(${mbr})${warnings.length ? ` (${warnings.length} truncated line(s))` : ""}`);
+      return { warnings, created };
     });
   }
 
-  // Stamp the job's printer output once so we can find compile spool later.
+  // --- compile ---
   private async ensureSpoolTag(): Promise<void> {
     if (this.spoolReady) return;
     this.splfTag = "MCP" + Math.random().toString(36).slice(2, 9).toUpperCase();
-    await this.cl(`ovrprtf file(*prtf) spool(*yes) hold(*yes) usrdta('${this.splfTag}') splfown(*curusrprf) ovrscope(*job)`);
+    await this.sql(qcmdexc(`ovrprtf file(*prtf) spool(*yes) hold(*yes) usrdta('${this.splfTag}') splfown(*curusrprf) ovrscope(*job)`));
     this.spoolReady = true;
   }
 
   private async readEvents(lib: string, obj: string): Promise<CompileError[]> {
-    const over = randOver();
-    await this.cl(`ovrdbf file(${over}) tofile(${lib}/EVFEVENT) mbr(${obj}) ovrscope(*job)`);
-    try {
-      const rows = await this.sql(`select cast(evfevent as varchar(400) ccsid ${this.profile.sourceFileCcsid}) as evfevent from ${over}`);
-      return parseEvfevent(rows.map((r) => String(r.EVFEVENT ?? "")));
-    } finally {
-      await this.cl(`dltovr file(${over}) lvl(*job)`).catch(() => {});
-    }
+    await this.sql(aliasStmt(EVENT_ALIAS, lib, "EVFEVENT", obj));
+    const rows = await this.sql(`select cast(evfevent as varchar(400) ccsid ${this.profile.sourceFileCcsid}) as evfevent from qtemp.${EVENT_ALIAS}`);
+    return parseEvfevent(rows.map((r) => String(r.EVFEVENT ?? "")));
   }
 
   async compile(opts: CompileOpts, reporter: Reporter = NOOP_REPORTER): Promise<CompileResult> {
     if (this.profile.readOnly) throw new Error("read-only mode (IBMI_READ_ONLY): compile is disabled");
-    const srclib = validName(opts.library, "library");
-    const srcf = validName(opts.sourceFile, "sourceFile");
-    const mbr = validName(opts.member, "member");
+    const { lib: srclib, srcf, mbr } = refNames(opts);
     const tgtlib = opts.targetLibrary ? validLibOrStar(opts.targetLibrary, "targetLibrary") : "*CURLIB";
     const name = opts.objectName ? validName(opts.objectName, "objectName") : mbr;
     await this.connect(reporter);
     let type = opts.type;
     if (!type) {
       reporter.step(`detecting the member type of ${srclib}/${srcf}(${mbr})`);
-      type = (await this.memberInfo(srclib, srcf, mbr)).type;
+      type = (await this.memberMeta(srclib, srcf, mbr)).type;
     }
     const command = buildCompileCommand(type, { tgtlib, name, srclib, srcfile: srcf, mbr }, opts.command);
-    // Guard the command (especially a user-supplied override) before it runs as CL.
     assertCompileCommandAllowed(command, this.profile.blockedCl);
 
     return this.serialize(async () => {
       await this.ensureSpoolTag();
-      const startRow = (await this.sql(`values current timestamp`))[0];
-      const startTs = startRow ? String(Object.values(startRow)[0]) : undefined;
-
       reporter.log("info", `compile command: ${command}`);
       reporter.step(`compiling ${mbr} (${command.trim().split(/\s+/)[0]}) on ${this.profile.host}`);
       const result = await this.clResult(command);
@@ -378,17 +396,13 @@ export class MapepireBackend {
 
       let listing = "";
       try {
-        const splfs = await this.sql(
-          `select qualified_job_name, spooled_file_name, spooled_file_number
-             from table(qsys2.spooled_file_info(starting_timestamp => '${startTs}', user_data => '${this.splfTag}', status => '*HELD'))`,
-        );
+        const splfs = await this.sql(`select qualified_job_name, spooled_file_name, spooled_file_number
+             from table(qsys2.spooled_file_info(user_data => '${this.splfTag}', status => '*HELD'))`);
         const parts: string[] = [];
         for (const s of splfs) {
-          const rows = await this.sql(
-            `select spooled_data from table(systools.spooled_file_data(
+          const rows = await this.sql(`select spooled_data from table(systools.spooled_file_data(
                 job_name => '${s.QUALIFIED_JOB_NAME}', spooled_file_name => '${s.SPOOLED_FILE_NAME}',
-                spooled_file_number => '${s.SPOOLED_FILE_NUMBER}')) order by ordinal_position`,
-          );
+                spooled_file_number => '${s.SPOOLED_FILE_NUMBER}')) order by ordinal_position`);
           parts.push(rows.map((r) => String(r.SPOOLED_DATA ?? "").replace(/\s+$/, "")).join("\n"));
         }
         listing = parts.join("\n");
@@ -396,14 +410,13 @@ export class MapepireBackend {
         listing = `(could not read spool: ${e.message})`;
       }
 
-      // Structured errors need a concrete target library to locate EVFEVENT.
       let errors: CompileError[] = [];
-      if (tgtlib !== "*CURLIB") {
+      if (tgtlib !== "*CURLIB") { // EVFEVENT needs a concrete library to locate
         reporter.step(`reading structured errors from ${tgtlib}/EVFEVENT(${name})`);
         errors = await this.readEvents(tgtlib, name).catch(() => []);
       } else listing += "\n\n(pass an explicit targetLibrary for structured EVFEVENT errors)";
 
-      await this.cl(`dltsplf file(*select) select(*current *all *all ${this.splfTag})`).catch(() => {});
+      await this.sql(qcmdexc(`dltsplf file(*select) select(*current *all *all ${this.splfTag})`)).catch(() => {});
       const messages = result?.error ? `[${result.sql_state ?? ""}] ${result.error}` : "";
       reporter.log(success ? "info" : "error", `compile ${mbr}: ${success ? "SUCCESS" : "FAILED"} (${errors.length} evfevent record(s))`);
       return { command, success, listing, messages, errors };
