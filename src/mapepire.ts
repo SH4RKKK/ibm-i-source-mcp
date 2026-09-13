@@ -60,7 +60,8 @@ export class MapepireBackend {
   private job?: InstanceType<typeof SQLJob>;
   private connecting?: Promise<InstanceType<typeof SQLJob>>;
   private chain: Promise<unknown> = Promise.resolve();
-  private splfTag?: string;      // usrdta tag stamped on this job's spooled files
+  // minted once and kept across a reconnect, so a dropped job's held spool stays reachable
+  private readonly splfTag = ("MCP" + Math.random().toString(36).slice(2).toUpperCase() + "0000000").slice(0, 10);
   private spoolReady = false;
 
   constructor(private profile: Profile) {}
@@ -239,7 +240,7 @@ export class MapepireBackend {
       }
       reporter.step(`scanning ${members.length} member(s) across ${files.size} source file(s) for "${raw}"`);
 
-      await this.ensureSpoolTag();
+      await this.holdSpool();
       await this.dropTaggedSpool();
 
       // fndstrpdm always ignores case, so cs filters the superset below and drops the cap with it
@@ -299,7 +300,10 @@ export class MapepireBackend {
           `Nothing was changed on the IBM i. To add it, call upload_source_member again with ` +
           `create: true (that runs addpfm), and pass memberType if it cannot be taken from the ` +
           `local file's extension.`);
-        const type = validName((opts.memberType ?? "").trim(), "memberType");
+        if (!opts.memberType?.trim()) throw new Error(
+          `cannot tell what source type ${lib}/${srcf}(${mbr}) should be. Nothing was changed. ` +
+          `Pass memberType, the local file's extension did not give one usable as a srctype.`);
+        const type = validName(opts.memberType.trim(), "memberType");
         const desc = (opts.text ?? "").replace(/\s+/g, " ").trim().slice(0, 50).replace(/'/g, "''");
         reporter.step(`creating member ${mbr} with srctype(${type})`);
         await this.runOrThrow(
@@ -344,11 +348,8 @@ export class MapepireBackend {
 
   // --- spool ---
   // job scoped and touches nothing of the user's, so search still runs under IBMI_READ_ONLY
-  private async ensureSpoolTag(): Promise<void> {
+  private async holdSpool(): Promise<void> {
     if (this.spoolReady) return;
-    // kept across a reconnect: the tag is how dropTaggedSpool reaches the held files the dropped
-    // job left. A fresh one each time orphans them on the box permanently.
-    this.splfTag ??= ("MCP" + Math.random().toString(36).slice(2).toUpperCase() + "0000000").slice(0, 10);
     await this.sql(qcmdexc(`ovrprtf file(*prtf) spool(*yes) hold(*yes) usrdta('${this.splfTag}') splfown(*curusrprf) ovrscope(*job)`));
     this.spoolReady = true;
   }
@@ -371,7 +372,6 @@ export class MapepireBackend {
   // the exception to assertCompileCommandAllowed refusing dlt*: never from input, and
   // select(*current *all *all <tag>) reaches only this user's spool carrying our random tag.
   private async dropTaggedSpool(): Promise<void> {
-    if (!this.splfTag) return;
     await this.sql(qcmdexc(`dltsplf file(*select) select(*current *all *all ${this.splfTag})`)).catch(() => {});
   }
 
@@ -398,7 +398,7 @@ export class MapepireBackend {
     assertCompileCommandAllowed(command, this.profile.blockedCl);
 
     return this.serialize(async () => {
-      await this.ensureSpoolTag();
+      await this.holdSpool();
       await this.dropTaggedSpool(); // a search that failed mid read leaves its listing behind
       reporter.log("info", `compile command: ${command}`);
       reporter.step(`compiling ${mbr} (${command.trim().split(/\s+/)[0]}) on ${this.profile.host}`);

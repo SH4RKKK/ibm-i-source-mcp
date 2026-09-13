@@ -9,11 +9,13 @@ export function extFor(type: string): string {
   return t ? `.${t}` : ".txt";
 }
 
-// inverse of extFor. ".txt" is what extFor emits for a member with no type, so it is not a
-// real source type and must never reach addpfm.
+// inverse of extFor. These never reach addpfm as a srctype: TXT is what extFor emits for a member
+// with no type, and the rest are editor leftovers, so MYPGM.rpgle.bak would otherwise create a
+// member of srctype BAK. Returning undefined forces the caller to pass memberType.
+const NOT_A_SOURCE_TYPE = /^(TXT|BAK|ORIG|TMP|TEMP|SAVE|SAVED|SWP|OLD|NEW|COPY)$/;
 export function typeFromPath(path: string): string | undefined {
   const ext = /\.([A-Za-z0-9]+)$/.exec(path)?.[1]?.toUpperCase();
-  return !ext || ext === "TXT" ? undefined : ext;
+  return !ext || NOT_A_SOURCE_TYPE.test(ext) ? undefined : ext;
 }
 
 // --- sql escaping ---

@@ -13,10 +13,14 @@ const baseEnv: NodeJS.ProcessEnv = { IBMI_HOST: "h", IBMI_USER: "u", IBMI_PASSWO
 test("typeFromPath recovers the source type a new member needs", () => {
   // read_source_member saves <member>.<type>, so an upload that has to addpfm can take srctype from the file it is about to send.
   assert.equal(typeFromPath("ibmi-src/MYLIB/QDDSSRC/MYSCREEN.dspf"), "DSPF");
-  assert.equal(typeFromPath("C:\work\MYPGM.sqlrpgle"), "SQLRPGLE");
+  assert.equal(typeFromPath("C:\\work\\MYPGM.sqlrpgle"), "SQLRPGLE"); // a real windows path, \\w is not an escape
   assert.equal(typeFromPath("MYPGM_reviewed.rpgle"), "RPGLE");
   // .txt is what extFor emits when a member has no type: not a real srctype, so it must come back undefined and force the caller to pass one.
   assert.equal(typeFromPath("notes.txt"), undefined);
+  // an editor leftover must not become a srctype: MYPGM.rpgle.bak once created a member of type BAK
+  for (const leftover of ["MYPGM.rpgle.bak", "MYPGM.sqlrpgle.orig", "MYPGM.clle.tmp", "MYPGM.dspf.old"])
+    assert.equal(typeFromPath(leftover), undefined, leftover);
+  assert.equal(typeFromPath("MY.PGM.rpgle"), "RPGLE"); // a dot is legal in a member name
   assert.equal(typeFromPath("README"), undefined);
   assert.equal(typeFromPath("X" + extFor("CLLE")), "CLLE"); // round trip with its inverse
 });
