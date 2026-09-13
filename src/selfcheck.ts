@@ -13,8 +13,8 @@ const baseEnv: NodeJS.ProcessEnv = { IBMI_HOST: "h", IBMI_USER: "u", IBMI_PASSWO
 test("typeFromPath recovers the source type a new member needs", () => {
   // read_source_member saves <member>.<type>, so an upload that has to addpfm can take srctype from the file it is about to send.
   assert.equal(typeFromPath("ibmi-src/MYLIB/QDDSSRC/MYSCREEN.dspf"), "DSPF");
-  assert.equal(typeFromPath("C:\work\ORD100.sqlrpgle"), "SQLRPGLE");
-  assert.equal(typeFromPath("ORD100_reviewed.rpgle"), "RPGLE");
+  assert.equal(typeFromPath("C:\work\MYPGM.sqlrpgle"), "SQLRPGLE");
+  assert.equal(typeFromPath("MYPGM_reviewed.rpgle"), "RPGLE");
   // .txt is what extFor emits when a member has no type: not a real srctype, so it must come back undefined and force the caller to pass one.
   assert.equal(typeFromPath("notes.txt"), undefined);
   assert.equal(typeFromPath("README"), undefined);
@@ -32,25 +32,25 @@ test("parseFndstrpdm reads the listing structurally, not by its English headings
   const ruler = "    SEQNBR  " + "*...+....1....+....2....+....3....+....4....+....5....+....6....+....7....+....8....+....9....+....100" + " Last Changed Date";
   const hit = (seq: string, src: string) => seq.padStart(10) + "  " + src.padEnd(108) + "02-06-26";
   const listing = [
-    "5770WDS V7R6M0  250418 PTHS02          Programming Development Manager      12-09-26  18:00:04     Page     1",
+    "5770WDS V7R6M0  250418 MYSYS           Programming Development Manager      12-09-26  18:00:04     Page     1",
     "File  . . . . . . . . :   QRPGLESRC",
-    "Member  . . . . . . . :   AFDINFO_FR                     Creation date . . . . . . :   06-02-26",
+    "Member  . . . . . . . :   MYPGM                          Creation date . . . . . . :   06-02-26",
     "Type  . . . . . . . . :   RPGLE                          Last changed date . . . . :   06-02-26",
     "Record length . . . . :   112                            Number of records . . . . :   29",
     ruler,
     "            DCL",
-    hit("400", "dcl-f afdin_df workstn;"),
+    hit("400", "dcl-f myscreen workstn;"),
     hit("1100", "dcl-PI main;"),
     "_ _ _ _ _   E N D   O F   M E M B E R   _ _ _ _ _",
-    "Member  . . . . . . . :   ZZOTHER                        Creation date . . . . . . :   06-02-26",
+    "Member  . . . . . . . :   MYOTHER                        Creation date . . . . . . :   06-02-26",
     ruler,
     hit("250", "dcl-s x char(10);"),
   ];
-  const known = new Set(["AFDINFO_FR", "ZZOTHER"]);
+  const known = new Set(["MYPGM", "MYOTHER"]);
   assert.deepEqual(parseFndstrpdm(listing, known, "DCL"), [
-    { member: "AFDINFO_FR", seqNbr: 4, line: "dcl-f afdin_df workstn;" },
-    { member: "AFDINFO_FR", seqNbr: 11, line: "dcl-PI main;" },
-    { member: "ZZOTHER", seqNbr: 2.5, line: "dcl-s x char(10);" },
+    { member: "MYPGM", seqNbr: 4, line: "dcl-f myscreen workstn;" },
+    { member: "MYPGM", seqNbr: 11, line: "dcl-PI main;" },
+    { member: "MYOTHER", seqNbr: 2.5, line: "dcl-s x char(10);" },
   ]);
   // the change date sits past the ruler window, so it never lands in the source line
   assert.ok(!parseFndstrpdm(listing, known, "DCL").some((m) => m.line.includes("02-06-26")));
@@ -59,13 +59,13 @@ test("parseFndstrpdm reads the listing structurally, not by its English headings
 test("parseFndstrpdm does not let a mark line rename the member it is marking", () => {
   const ruler = "    SEQNBR  " + "*...+....1....+....2" + " Last Changed Date";
   const listing = [
-    "Member  . . . . . . . :   CALLER",
+    "Member  . . . . . . . :   MYCALLER",
     ruler,
-    "            ZZOTHER",
-    "       300  " + "callp zzother();".padEnd(20),
+    "            MYCALLED",
+    "       300  " + "callp mycalled();".padEnd(20),
   ];
-  assert.deepEqual(parseFndstrpdm(listing, new Set(["CALLER", "ZZOTHER"]), "ZZOTHER"),
-    [{ member: "CALLER", seqNbr: 3, line: "callp zzother();" }]);
+  assert.deepEqual(parseFndstrpdm(listing, new Set(["MYCALLER", "MYCALLED"]), "MYCALLED"),
+    [{ member: "MYCALLER", seqNbr: 3, line: "callp mycalled();" }]);
 });
 
 test("parseFndstrpdm keeps hits out when the member is not in the catalog list", () => {
