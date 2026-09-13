@@ -42,7 +42,12 @@ export function loadProfileFor(server?: string): Profile {
 }
 
 // --- profile ---
-const bool = (v: string | undefined, dflt: boolean) => (v === undefined || v === "" ? dflt : /^(1|true|yes|on)$/i.test(v));
+// fails closed: IBMI_READ_ONLY is a safety flag, so anything set that is not an explicit off
+// counts as on. "true " and "y" used to read as false and quietly unlock upload and compile.
+const bool = (v: string | undefined, dflt: boolean) => {
+  const t = v?.trim().toLowerCase();
+  return !t ? dflt : !/^(0|false|no|off)$/.test(t);
+};
 const list = (v: string | undefined) => (v ? v.split(/[,\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean) : []);
 
 export function loadProfile(env: NodeJS.ProcessEnv = process.env): Profile {

@@ -115,7 +115,7 @@ async function ensureJar(conn: Client, reporter: Reporter): Promise<string> {
   }
 }
 
-type ConnectReply = { success?: boolean; error?: string; id?: string };
+type ConnectReply = { success?: boolean; error?: string };
 
 // Races the connect reply against the jvm never answering and against the process dying first,
 // either of which would otherwise hang until the box is rebooted.
@@ -167,7 +167,6 @@ export async function connectSshMapepire(profile: Profile, reporter: Reporter = 
     if (resp?.success !== true) throw new Error(resp?.error || "mapepire connect failed");
     socket.on("close", () => { j.status = "ended"; });
     j.status = "ready";
-    if (resp.id) j.id = resp.id;
     j._sshConn = conn;
     j._closed = new Promise<never>((_, rej) => socket.once("close", () => rej(new Error(`connection to ${profile.host} lost: the ssh session closed. The next call reconnects automatically.`))));
     j._closed.catch(() => {}); // observed on demand via raceJobClosed

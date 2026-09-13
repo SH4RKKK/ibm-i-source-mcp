@@ -36,12 +36,10 @@ export const COMMAND_TEMPLATES: Record<string, string> = {
 
 export interface CompileVars { tgtlib: string; name: string; srclib: string; srcfile: string; mbr: string }
 
-const substitute = (t: string, v: CompileVars): string => t.replace(/&(tgtlib|name|srclib|srcfile|mbr)/g, (_, k: keyof CompileVars) => v[k]);
-
 export function buildCompileCommand(type: string | undefined, v: CompileVars, override?: string): string {
   const template = override || COMMAND_TEMPLATES[(type || "").toLowerCase()]; // an override is substituted too
   if (!template) throw new Error(`no compile template for type "${type}", pass an explicit \`command\``);
-  return substitute(template, v);
+  return template.replace(/&(tgtlib|name|srclib|srcfile|mbr)/g, (_, k: keyof CompileVars) => v[k]);
 }
 
 // --- command guard ---
@@ -86,12 +84,10 @@ export function parseEvfevent(lines: string[]): CompileError[] {
     const severity = Number(t[j]);
     const text = t.slice(j + 2).join(" ").trim(); // t[j+1] is the text length
     const startLine = Number(t[i - 4]);
-    const endLine = Number(t[i - 2]);
     out.push({
       severity: Number.isFinite(severity) ? severity : 0,
       msgId: t[i],
       line: Number.isFinite(startLine) ? startLine : undefined,
-      toLine: Number.isFinite(endLine) ? endLine : undefined,
       text: text || raw.trim(),
     });
   }

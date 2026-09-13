@@ -81,14 +81,14 @@ tool(
 
 tool(
   "search_source",
-  "Grep the CODE of the members in a library, returning the matching lines with their sequence numbers. This one reads every member, so it is the slow tool: scope it with sourceFile or memberType. To find a member by its name or its TEXT description instead, use list_members with a filter, which is a single query.",
+  "Grep the CODE of the members in a library, returning the matching lines with their sequence numbers. Still the slow tool, so scope it with sourceFile or memberType. To find a member by its name or its TEXT description instead, use list_members with a filter, which is a single query.",
   {
     library: z.string().describe("library to search"),
     searchTerm: z.string().describe("literal string to find in the source lines (not a regex)"),
     sourceFile: z.string().optional().describe("limit to one source file, e.g. QDDSSRC"),
     memberType: z.string().optional().describe("limit to a member type, e.g. DSPF, RPGLE"),
     caseSensitive: z.boolean().optional().describe("default false"),
-    maxResults: z.number().optional().describe("default 200"),
+    maxResults: z.number().int().positive().optional().describe("default 200"),
     server: serverArg,
   },
   async ({ server, ...opts }, r) => {
@@ -106,7 +106,7 @@ tool(
   "list_libraries",
   "List libraries (schemas) on the IBM i with their text descriptions, so you can discover where source lives before drilling in with list_source_files and list_members. Lists user libraries by default. Pass filter to narrow by a substring of the library name or its description, e.g. a project or application name.",
   {
-    filter: z.string().optional().describe("substring to match against the library name or its text, case-insensitive. Omit to list all user libraries."),
+    filter: z.string().optional().describe("substring to match against the library name or its text, ignoring case. Omit to list all user libraries."),
     includeSystem: z.boolean().optional().describe("also include the IBM Q* system libraries (default false, user libraries only)"),
     server: serverArg,
   },
@@ -121,7 +121,7 @@ tool(
 
 tool(
   "manage_library_list",
-  "View or change the connection's library list. `show` returns the current list (SYSTEM/PRODUCT/CURRENT/USER portions). `add` and `remove` add or drop one library (ADDLIBLE/RMVLIBLE), `set_current` sets the current library (CHGCURLIB), and `replace` sets the whole user portion (CHGLIBL). Changes last for the session and are used by later compiles, like adding a library on the green screen. It only changes the job's library list, never objects or data. Use this when a compile needs a library that is not on the sign-on list. The change actions are disabled when IBMI_READ_ONLY is set, while `show` always works.",
+  "View or change the connection's library list. `show` returns the current list (SYSTEM/PRODUCT/CURRENT/USER portions). `add` and `remove` add or drop one library (ADDLIBLE/RMVLIBLE), `set_current` sets the current library (CHGCURLIB), and `replace` sets the whole user portion (CHGLIBL). Changes last for the session and are used by later compiles, like adding a library on the green screen. It only changes the job's library list, never objects or data. Use this when a compile needs a library that is not on the sign on list. The change actions are disabled when IBMI_READ_ONLY is set, while `show` always works.",
   {
     action: z.enum(["show", "add", "remove", "set_current", "replace"]).describe("show the list, add/remove one library, set the current library, or replace the whole user portion"),
     library: z.string().optional().describe("the library for add, remove, or set_current"),
@@ -160,7 +160,7 @@ tool(
     library: z.string(),
     sourceFile: z.string().optional().describe("limit to one source file, e.g. QDDSSRC"),
     memberType: z.string().optional().describe("limit to a type, e.g. DSPF"),
-    filter: z.string().optional().describe("substring to match against the member name or its text description, case-insensitive. Omit to list everything."),
+    filter: z.string().optional().describe("substring to match against the member name or its text description, ignoring case. Omit to list everything."),
     server: serverArg,
   },
   async ({ library, sourceFile, memberType, filter, server }, r) => {
@@ -174,12 +174,12 @@ tool(
 
 tool(
   "upload_source_member",
-  "Upload a local file into a source member on the IBM i. By default this is a read-modify-write of a member that already exists, defaulting to the copy read_source_member wrote. For brand new development, where the member does not exist yet, pass create: true and the member is added first (addpfm) with the right source type. Creation is opt-in so a mistyped member name cannot leave a stray member behind in a customer library.",
+  "Upload a local file into a source member on the IBM i. By default this reads, modifies and writes back a member that already exists, defaulting to the copy read_source_member wrote. For brand new development, where the member does not exist yet, pass create: true and the member is added first (addpfm) with the right source type. Creation is opt in so a mistyped member name cannot leave a stray member behind in a customer library.",
   {
     library: z.string(),
     sourceFile: z.string(),
     member: z.string(),
-    localPath: z.string().optional().describe("path to the edited file; defaults to the local copy from read_source_member"),
+    localPath: z.string().optional().describe("path to the edited file, defaults to the local copy from read_source_member"),
     content: z.string().optional().describe("upload this text directly instead of reading a file"),
     create: z.boolean().optional().describe("create the member first if it does not exist yet (addpfm). Default false: uploading into a member that is not there fails instead, so a typo cannot create one."),
     memberType: z.string().optional().describe("source type used when creating, e.g. DSPF, SQLRPGLE, RPGLE, PF, CLLE. Defaults to the local file's extension, since read_source_member names copies <member>.<type>. Required when creating from `content`. Worth passing explicitly: the type decides which command compile_member picks."),
@@ -214,10 +214,10 @@ tool(
     library: z.string(),
     sourceFile: z.string(),
     member: z.string(),
-    targetLibrary: z.string().optional().describe("where the object is created; default *CURLIB. Pass a real library to also get structured EVFEVENT errors."),
-    objectName: z.string().optional().describe("compiled object name; default = member"),
+    targetLibrary: z.string().optional().describe("where the object is created, default *curlib. Pass a real library to also get structured EVFEVENT errors."),
+    objectName: z.string().optional().describe("compiled object name, defaults to the member name"),
     command: z.string().optional().describe("full CL compile command override"),
-    type: z.string().optional().describe("override the auto-detected member type, e.g. RPGLE"),
+    type: z.string().optional().describe("override the detected member type, e.g. RPGLE"),
     server: serverArg,
   },
   async ({ server, ...opts }, r) => {

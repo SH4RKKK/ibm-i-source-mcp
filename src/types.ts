@@ -71,7 +71,7 @@ export interface CompileOpts {
   type?: string;                 // override detected member type
 }
 
-export interface CompileError { severity: number; line?: number; toLine?: number; msgId?: string; text: string; }
+export interface CompileError { severity: number; line?: number; msgId?: string; text: string; }
 
 export interface CompileResult {
   command: string;

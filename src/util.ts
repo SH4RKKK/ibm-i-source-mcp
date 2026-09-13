@@ -17,9 +17,10 @@ export function typeFromPath(path: string): string | undefined {
 }
 
 // --- sql escaping ---
-// for a `like '%...%'` we build. Upper cased because the column is compared upper cased.
+// for a `like '%...%' escape '\'` we build. Upper cased because the column is compared upper
+// cased, and % and _ are escaped so a filter is a substring rather than a pattern.
 export function likeLiteral(term: string): string {
-  return term.replace(/'/g, "''").toUpperCase();
+  return term.replace(/'/g, "''").replace(/[\\%_]/g, "\\$&").toUpperCase();
 }
 
 // --- fndstrpdm listing ---
@@ -29,7 +30,7 @@ export function likeLiteral(term: string): string {
 export function parseFndstrpdm(lines: string[], known: Set<string>, needle: string): { member: string; seqNbr: number; line: string }[] {
   const out: { member: string; seqNbr: number; line: string }[] = [];
   const mark = needle.trim().toUpperCase();
-  let member = "";
+  let member = "", named = false, fresh = false;
   let from = 12, to = 112;
   for (const raw of lines) {
     const seq = /^(\s*)(\d+) {2}/.exec(raw);
@@ -40,11 +41,15 @@ export function parseFndstrpdm(lines: string[], known: Set<string>, needle: stri
     if (raw.startsWith(" ")) {
       if (raw.trim().toUpperCase() === mark) continue;
       const ruler = /\*[.+\d]{8,}/.exec(raw);
-      if (ruler) { from = ruler.index; to = ruler.index + ruler[0].length; }
+      if (ruler) { from = ruler.index; to = ruler.index + ruler[0].length; fresh = true; }
       continue;
     }
+    // a heading, so the block is changing. Forgetting the member here is what stops hits from a
+    // member outside `known` being reported under the last one that was in it.
+    if (fresh) { member = ""; named = false; fresh = false; }
+    if (named) continue; // only the first known name in a block is the member, not a later Type
     const value = raw.split(":")[1]?.trim().split(/\s+/)[0]?.toUpperCase();
-    if (value && known.has(value)) member = value;
+    if (value && known.has(value)) { member = value; named = true; }
   }
   return out;
 }

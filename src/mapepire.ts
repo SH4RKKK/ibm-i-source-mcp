@@ -20,11 +20,11 @@ type Row = Record<string, any>;
 interface MemberMetaRow { ccsid: number; length: number; type: string; changed?: string; exists: boolean }
 
 // --- validators ---
-function validName(v: string, what: string): string {
+export function validName(v: string, what: string): string {
   if (!NAME.test(v)) throw new Error(`invalid ${what}: "${v}"`);
   return v.toUpperCase();
 }
-function validLibOrStar(v: string, what: string): string {
+export function validLibOrStar(v: string, what: string): string {
   if (/^\*[a-z]+$/i.test(v)) return v.toUpperCase(); // *curlib, *libl
   return validName(v, what);
 }
@@ -148,7 +148,7 @@ export class MapepireBackend {
                                     where table_schema = '${lib}' and file_type = 'S')
        ${srcf ? `and system_table_name = '${srcf}'` : ""}
        ${type ? `and rtrim(cast(source_type as varchar(10))) = '${type}'` : ""}
-       ${like ? `and (upper(system_table_member) like '%${like}%' or upper(partition_text) like '%${like}%')` : ""}
+       ${like ? `and (upper(system_table_member) like '%${like}%' escape '\\' or upper(partition_text) like '%${like}%' escape '\\')` : ""}
        order by source_file, name`);
   }
 
@@ -156,7 +156,7 @@ export class MapepireBackend {
     const scope = includeSystem ? "*ALL" : "*ALLUSR"; // *ALLUSR is user libraries, where source lives
     const f = filter?.trim();
     const like = f ? likeLiteral(f) : undefined;
-    const where = like ? `where upper(objname) like '%${like}%' or upper(objtext) like '%${like}%'` : "";
+    const where = like ? `where upper(objname) like '%${like}%' escape '\\' or upper(objtext) like '%${like}%' escape '\\'` : "";
     await this.connect(reporter);
     reporter.step(`listing ${includeSystem ? "all" : "user"} libraries${f ? ` matching "${f}"` : ""}, a full scan can take a moment`);
     const rows = await this.sql(`select rtrim(objname) as name, coalesce(rtrim(objtext), '') as text
@@ -243,21 +243,24 @@ export class MapepireBackend {
       await this.dropTaggedSpool();
 
       // fndstrpdm always ignores case, so cs filters the superset below and drops the cap with it
-      const cap = cs ? "*ALL" : String(max + 1);
+      const cap = cs ? "*all" : String(max + 1);
       const order = [...files.keys()];
       // every scan first, then one spool read: the round trips cost more than the scan does
       const scanned: string[] = [];
       for (const [i, f] of order.entries()) {
         reporter.bar(`searching ${lib}/${f}`, i, order.length);
         const r = await this.clResult(
-          `fndstrpdm string('${raw.replace(/'/g, "''")}') file(${lib}/${f}) mbr(*ALL) option(*NONE) prtrcds(${cap})`);
+          `fndstrpdm string('${raw.replace(/'/g, "''")}') file(${lib}/${f}) mbr(*all) option(*none) prtrcds(${cap})`);
         if (r?.success === false) reporter.log("warning", `skipped ${lib}/${f}: ${r.error || r.sql_state || "fndstrpdm failed"}`);
         else scanned.push(f); // a failed scan prints nothing, so it must not shift the pairing
       }
       reporter.bar(`reading ${scanned.length} listing(s)`, order.length, order.length);
-      const listings = await this.readTaggedSpool();
-      await this.dropTaggedSpool();
-      if (listings.length !== scanned.length) reporter.log("warning", `${scanned.length} scan(s) but ${listings.length} listing(s), results may be short`);
+      let listings: string[][];
+      try { listings = await this.readTaggedSpool(); } finally { await this.dropTaggedSpool(); }
+      // listings pair to scans by print order, so a count mismatch would parse every later file
+      // against the wrong member set. Wrong hits are worse than none.
+      if (listings.length !== scanned.length) throw new Error(
+        `search printed ${listings.length} listing(s) for ${scanned.length} source file(s), so hits cannot be tied to members. Narrow it with sourceFile.`);
 
       const matches: SearchMatch[] = [];
       let truncated = false;
@@ -324,9 +327,10 @@ export class MapepireBackend {
       );
 
       reporter.log("info", `${created ? "filling the new" : "replacing the content of"} ${lib}/${srcf}(${mbr}) with ${lines.length} lines`);
-      // the whole member is one addToBatch, so one round trip: 30000 lines (2.3MB) lands in 1.4s
+      // one statement with every row bound, so one round trip: 30000 lines (2.3MB) in 1.4s
       reporter.step(`uploading ${lines.length} lines to ${mbr}`);
       try {
+        // srcseq is packed(6,2), so past 9999 lines the whole numbers run out and it steps by .01
         await this.sql(`insert into qtemp.${WRITE_ALIAS} (srcseq, srcdat, srcdta) values (?, ?, ?)`,
           lines.map((l, i) => [scale ? (i + 1) / 100 : i + 1, 0, l]));
       } catch (e: any) {
@@ -342,7 +346,9 @@ export class MapepireBackend {
   // job scoped and touches nothing of the user's, so search still runs under IBMI_READ_ONLY
   private async ensureSpoolTag(): Promise<void> {
     if (this.spoolReady) return;
-    this.splfTag = "MCP" + Math.random().toString(36).slice(2, 9).toUpperCase();
+    // kept across a reconnect: the tag is how dropTaggedSpool reaches the held files the dropped
+    // job left. A fresh one each time orphans them on the box permanently.
+    this.splfTag ??= ("MCP" + Math.random().toString(36).slice(2).toUpperCase() + "0000000").slice(0, 10);
     await this.sql(qcmdexc(`ovrprtf file(*prtf) spool(*yes) hold(*yes) usrdta('${this.splfTag}') splfown(*curusrprf) ovrscope(*job)`));
     this.spoolReady = true;
   }
@@ -363,7 +369,7 @@ export class MapepireBackend {
   }
 
   // the exception to assertCompileCommandAllowed refusing dlt*: never from input, and
-  // select(*current *all *all <tag>) reaches only what this job printed.
+  // select(*current *all *all <tag>) reaches only this user's spool carrying our random tag.
   private async dropTaggedSpool(): Promise<void> {
     if (!this.splfTag) return;
     await this.sql(qcmdexc(`dltsplf file(*select) select(*current *all *all ${this.splfTag})`)).catch(() => {});
@@ -393,6 +399,7 @@ export class MapepireBackend {
 
     return this.serialize(async () => {
       await this.ensureSpoolTag();
+      await this.dropTaggedSpool(); // a search that failed mid read leaves its listing behind
       reporter.log("info", `compile command: ${command}`);
       reporter.step(`compiling ${mbr} (${command.trim().split(/\s+/)[0]}) on ${this.profile.host}`);
       const result = await this.clResult(command);

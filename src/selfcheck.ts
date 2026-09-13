@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extFor, parseFndstrpdm, typeFromPath } from "./util.js";
+import { extFor, likeLiteral, parseFndstrpdm, typeFromPath } from "./util.js";
 import { loadProfile } from "./config.js";
-import { MapepireBackend, aliasStmt, memberMetaStmt, qcmdexc } from "./mapepire.js";
+import { MapepireBackend, aliasStmt, memberMetaStmt, qcmdexc, validLibOrStar, validName } from "./mapepire.js";
 import { ToolReporter } from "./report.js";
-import { assertCompileCommandAllowed, buildCompileCommand, buildLibraryListCommands, parseEvfevent } from "./compile.js";
+import { COMMAND_TEMPLATES, assertCompileCommandAllowed, buildCompileCommand, buildLibraryListCommands, parseEvfevent } from "./compile.js";
 
 // the three variables a profile cannot do without, spread where a test adds more
 const baseEnv: NodeJS.ProcessEnv = { IBMI_HOST: "h", IBMI_USER: "u", IBMI_PASSWORD: "pw" };
@@ -75,6 +75,89 @@ test("parseFndstrpdm keeps hits out when the member is not in the catalog list",
   assert.deepEqual(parseFndstrpdm([], new Set(["OTHER"]), "dcl"), []);
 });
 
+test("parseFndstrpdm drops hits from a member the catalog list excludes", () => {
+  // fndstrpdm scans mbr(*all) while `known` is already filtered by memberType, so a member of the
+  // wrong type appears in the listing. Its hits used to be reported under the previous member.
+  const ruler = "    SEQNBR  " + "*...+....1....+....2....+....3" + " Last Changed Date";
+  const hit = (seq: string, src: string) => seq.padStart(10) + "  " + src.padEnd(30) + "02-06-26";
+  const listing = [
+    "Member  . . . . . . . :   MYPGM",
+    "Record length . . . . :   112",
+    ruler,
+    hit("100", "this one is really in MYPGM"),
+    "Number of records found . . . . . :   1",
+    "_ _ _ _ _   E N D   O F   M E M B E R   _ _ _ _ _",
+    "Member  . . . . . . . :   MYOTHER",
+    "Record length . . . . :   112",
+    ruler,
+    hit("900", "this one is in MYOTHER"),
+  ];
+  assert.deepEqual(parseFndstrpdm(listing, new Set(["MYPGM"]), "this"),
+    [{ member: "MYPGM", seqNbr: 1, line: "this one is really in MYPGM" }]);
+});
+
+test("parseFndstrpdm takes the member from the first known name in a block, not a later heading", () => {
+  // a Type heading reading RPGLE must not win when a member happens to be named RPGLE
+  const ruler = "    SEQNBR  " + "*...+....1....+....2" + " Last Changed Date";
+  const listing = [
+    "Member  . . . . . . . :   MYPGM",
+    "Type  . . . . . . . . :   RPGLE",
+    ruler,
+    "       100  " + "belongs to MYPGM".padEnd(20),
+  ];
+  assert.deepEqual(parseFndstrpdm(listing, new Set(["MYPGM", "RPGLE"]), "belongs"),
+    [{ member: "MYPGM", seqNbr: 1, line: "belongs to MYPGM" }]);
+});
+
+test("parseFndstrpdm keeps attributing across a page break that reprints the heading", () => {
+  const ruler = "    SEQNBR  " + "*...+....1....+....2" + " Last Changed Date";
+  const listing = [
+    "Member  . . . . . . . :   MYPGM", ruler,
+    "       100  " + "before the break".padEnd(20),
+    "5770WDS V7R6M0  MYSYS   Programming Development Manager   12-09-26  18:00:04     Page     2",
+    "File  . . . . . . . . :   QRPGLESRC",
+    "Member  . . . . . . . :   MYPGM", ruler,
+    "       200  " + "after the break".padEnd(20),
+  ];
+  assert.deepEqual(parseFndstrpdm(listing, new Set(["MYPGM"]), "the"), [
+    { member: "MYPGM", seqNbr: 1, line: "before the break" },
+    { member: "MYPGM", seqNbr: 2, line: "after the break" },
+  ]);
+});
+
+test("likeLiteral escapes the wildcards so a filter is a substring, not a pattern", () => {
+  // both backslashes are load bearing in the source: drop one and _ is a live wildcard again
+  assert.equal(likeLiteral("ord_100"), "ORD\\_100");  // literal _, would otherwise match ordx100
+  assert.equal(likeLiteral("50%"), "50\\%");
+  assert.equal(likeLiteral("a\\b"), "A\\\\B");        // the escape character itself
+  assert.equal(likeLiteral("o'brien"), "O''BRIEN");
+});
+
+test("validName is the trust boundary: names are spliced into SQL and CL, never bound", () => {
+  for (const ok of ["MYLIB", "mylib", "A", "Q$SPCL", "MY#LIB", "MY@LIB", "A_B.C", "ABCDEFGHIJ"])
+    assert.equal(validName(ok, "library"), ok.toUpperCase(), `${ok} must be accepted`);
+  for (const bad of ["", "1ABC", "_ABC", "ABCDEFGHIJK", "MY LIB", "MY'LIB", "MY;LIB", "MY-LIB",
+                     "MY/LIB", "MY(LIB", "MY*LIB", "MYLIB--", "МYLIB", "*CURLIB"])
+    assert.throws(() => validName(bad, "library"), /invalid library/, `${JSON.stringify(bad)} must be rejected`);
+  // only validLibOrStar takes the special values, and it still falls back to validName
+  assert.equal(validLibOrStar("*curlib", "targetLibrary"), "*CURLIB");
+  assert.equal(validLibOrStar("MYLIB", "targetLibrary"), "MYLIB");
+  assert.throws(() => validLibOrStar("*CUR LIB", "targetLibrary"), /invalid targetLibrary/);
+  assert.throws(() => validLibOrStar("MY LIB", "targetLibrary"), /invalid targetLibrary/);
+});
+
+test("every compile template substitutes fully, asks for events, and passes the guard", () => {
+  const v = { tgtlib: "MYLIB", name: "MYPGM", srclib: "SRCLIB", srcfile: "QRPGLESRC", mbr: "MYPGM" };
+  for (const type of Object.keys(COMMAND_TEMPLATES)) {
+    const cmd = buildCompileCommand(type, v);
+    assert.ok(!cmd.includes("&"), `${type}: an unsubstituted token survived`);
+    assert.equal(cmd.split(/\s+/)[0], cmd.split(/\s+/)[0].toLowerCase(), `${type}: the CL verb must be lowercase`);
+    assert.doesNotThrow(() => assertCompileCommandAllowed(cmd), `${type}: blocked by its own guard`);
+    // *eventf is what writes EVFEVENT, without it a failed compile reports zero structured errors
+    if (type !== "sql") assert.ok(cmd.includes("option(*eventf)"), `${type}: lost option(*eventf)`);
+  }
+});
+
 // --- sql templates ---
 test("qcmdexc wraps a CL command as one SQL statement, doubling quotes for the literal", () => {
   assert.equal(qcmdexc("clrpfm file(L/F) mbr(M)"), "call qsys2.qcmdexc('clrpfm file(L/F) mbr(M)')");
@@ -120,6 +203,13 @@ test("loadProfile parses safety options", () => {
   assert.deepEqual(p.blockedCl, ["crtpf", "dltf"]);
 });
 
+test("IBMI_READ_ONLY fails closed, so a stray space cannot unlock the box", () => {
+  for (const on of ["true", "true ", " true", "TRUE", "yes", "y", "on", "1", "enabled", "anything"])
+    assert.equal(loadProfile({ ...baseEnv, IBMI_READ_ONLY: on }).readOnly, true, `${JSON.stringify(on)} must lock`);
+  for (const off of ["false", "0", "no", "off", "FALSE", " off ", "", undefined as any])
+    assert.equal(loadProfile({ ...baseEnv, IBMI_READ_ONLY: off }).readOnly, false, `${JSON.stringify(off)} must not lock`);
+});
+
 test("loadProfile fails loudly when host/user/password missing", () => {
   assert.throws(() => loadProfile({ IBMI_HOST: "h" }), /IBMI_HOST, IBMI_USER and\/or IBMI_PASSWORD/);
 });
@@ -161,7 +251,6 @@ test("parseEvfevent parses a real DDS ERROR record (severity, line, clean text),
   assert.equal(errs[0].msgId, "CPD7484");
   assert.equal(errs[0].severity, 20); // the number, not the "E" class letter
   assert.equal(errs[0].line, 17);
-  assert.equal(errs[0].toLine, 17);
   assert.equal(errs[0].text, "Keyword not valid for this file type."); // no stray length token
 });
 
