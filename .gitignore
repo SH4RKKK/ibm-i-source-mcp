@@ -6,9 +6,5 @@ ibmi-src/
 sbom.cdx.json
 CLAUDE.md
 
-# the Claude Code plugin, untested and not released yet
-.claude-plugin/
-agents/
-skills/
-references/
-PLUGIN.md
+# local Claude Code tooling, not part of the package
+.claude/
