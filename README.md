@@ -93,8 +93,11 @@ All configuration lives in a `.env` file. The server looks for it in these place
 1. a folder you name yourself in `IBMI_MCP_CONFIG_DIR`. Set it on the MCP server entry rather than in
    your shell, because your MCP client launches the server, not you:
    `claude mcp add ibmi-source --env IBMI_MCP_CONFIG_DIR=/path/to/folder -- npx -y ibm-i-source-mcp`
-2. `~/.ibm-i-source-mcp/`, which is where it should go for an npm or npx install
-3. the server's own install folder, next to `dist/`, if you cloned and built from source
+2. `~/.ibm-i-servers/`, shared by every IBM i MCP server on the machine. Put your credentials here
+   when you run more than one of them and want a single copy
+3. `~/.ibm-i-source-mcp/`, this server's own folder, which is where it should go for an npm or npx
+   install
+4. the server's own install folder, next to `dist/`, if you cloned and built from source
 
 A real environment variable, if one is set, always takes precedence over a value in the file.
 

@@ -6,10 +6,12 @@ import { config as loadEnv, parse } from "dotenv";
 import type { Profile } from "./types.js";
 
 // --- constants ---
-// searched in order, first match wins. The install folder is last because an npx install lives
-// in a cache that is wiped on every update.
+// searched in order, first match wins. The shared folder outranks this server's own so one set of
+// credentials serves every IBM i MCP server on the machine. The install folder is last because an
+// npx install lives in a cache that is wiped on every update.
 const CONFIG_DIRS = [
   process.env.IBMI_MCP_CONFIG_DIR,
+  join(homedir(), ".ibm-i-servers"),
   join(homedir(), ".ibm-i-source-mcp"),
   join(dirname(fileURLToPath(import.meta.url)), ".."),
 ].filter((d): d is string => Boolean(d));
