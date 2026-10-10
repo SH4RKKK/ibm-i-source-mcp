@@ -1,16 +1,17 @@
 import mapepire from "@ibm/mapepire-js";
-import type { CompileError, CompileOpts, CompileResult, LibraryListAction, LibraryListChange, LibraryListEntry, MemberMeta, MemberRef, Profile, Reporter, SearchMatch, SearchOpts, SearchResult } from "./types.js";
+import type { CompileError, CompileOpts, CompileResult, LibraryListAction, LibraryListChange, LibraryListEntry, MemberMeta, MemberRef, Profile, Reporter, SearchMatch, SearchOpts, SearchResult, SqlColumn } from "./types.js";
 import { NOOP_REPORTER } from "./types.js";
 import { assertCompileCommandAllowed, buildCompileCommand, buildLibraryListCommands, parseEvfevent } from "./compile.js";
-import { likeLiteral, parseFndstrpdm } from "./util.js";
+import { assertSelectOnly, likeLiteral, parseFndstrpdm, withTimeLimit } from "./util.js";
 import { closeSshMapepire, connectSshMapepire, raceJobClosed } from "./sshMapepire.js";
 
 const { SQLJob } = mapepire;
 
 // --- constants ---
 const NAME = /^[A-Za-z#$@][A-Za-z0-9#$@_.]{0,9}$/; // trust boundary: spliced into SQL and CL, never bound
-const MAX_ROWS = 100_000;        // single block fetch, no paging: fail rather than truncate
+const MAX_ROWS = 100_000;
 const SRCSEQ_WHOLE_MAX = 9999;   // srcseq is packed(6,2), so 9999.99 is the ceiling
+const SQL_TIME_LIMIT_MS = 10_000;
 
 // shared by every call, which is what serialize() protects. qtemp is private to the job.
 const READ_ALIAS = "MCPREAD", WRITE_ALIAS = "MCPWRITE", EVENT_ALIAS = "MCPEVENT";
@@ -88,13 +89,20 @@ export class MapepireBackend {
   }
 
   private async sql(statement: string, parameters?: any[]): Promise<Row[]> {
+    const { rows, truncated } = await this.fetchRows(statement, MAX_ROWS, parameters);
+    if (truncated) throw new Error(`result exceeded ${MAX_ROWS} rows and would be truncated, narrow the request`);
+    return rows;
+  }
+
+  private async fetchRows(statement: string, max: number, parameters?: any[]): Promise<{ rows: Row[]; columns: SqlColumn[]; truncated: boolean }> {
     const job = await this.connect();
     const q = (job as any).query(statement, parameters ? { parameters } : undefined);
-    const rs: any = await raceJobClosed(job, q.execute(MAX_ROWS));
+    // one past the cap: is_done stays false when a result is exactly the cap, so it cannot tell truncation
+    const rs: any = await raceJobClosed(job, q.execute(max + 1));
     await q.close?.();
-    // not done means there were more rows than MAX_ROWS
-    if (rs.has_results && rs.is_done === false) throw new Error(`result exceeded ${MAX_ROWS} rows and would be truncated, narrow the request`);
-    return rs.has_results ? (rs.data as Row[]) : [];
+    const columns = (rs.metadata?.columns ?? []).map((c: any) => ({ name: c.name, type: c.type, precision: c.precision, scale: c.scale }));
+    const data: Row[] = rs.has_results ? rs.data : [];
+    return { rows: data.slice(0, max), columns, truncated: data.length > max };
   }
 
   private async runOrThrow(statement: string, what: string): Promise<void> {
@@ -215,6 +223,22 @@ export class MapepireBackend {
     reporter.step(`listing members in ${lib}${srcf ? `/${srcf}` : " (all source files)"}${f ? ` matching "${f}"` : ""}`);
     const rows = await this.enumerateMembers(lib, srcf, type, f);
     return rows.map((r) => ({ sourceFile: r.SOURCE_FILE, name: r.NAME, type: (r.TYPE || "").toLowerCase(), text: r.TEXT || "", lines: Number(r.LINES) || undefined }));
+  }
+
+  // --- sql ---
+  async runSql(statement: string, maxRows?: number, reporter: Reporter = NOOP_REPORTER): Promise<{ rows: Row[]; columns: SqlColumn[]; truncated: boolean; cap: number }> {
+    const sql = assertSelectOnly(statement, this.profile.blockedTables);
+    const cap = Math.min(maxRows ?? 10, MAX_ROWS);
+    await this.connect(reporter);
+    reporter.step(`running sql, first ${cap} row(s)`);
+    // mapepire cannot cancel and cancel_sql is ignored, so the reset frees the session, not the box
+    const { rows, columns, truncated } = await withTimeLimit(this.fetchRows(sql, cap), SQL_TIME_LIMIT_MS, () => void this.close(),
+      `run_sql gave up after ${SQL_TIME_LIMIT_MS / 1000}s and reset the session, so the query may still be running on the box. Narrow the select. The next call reconnects, and any manage_library_list change is gone`);
+    const names = columns.map((c) => c.name);
+    const dup = names.find((n, i) => names.indexOf(n) !== i);
+    if (dup) throw new Error(`two columns are named ${dup}, give one an alias with as`);
+    reporter.log("info", `run_sql returned ${rows.length} row(s)${truncated ? `, truncated at ${cap}` : ""}`);
+    return { rows, columns, truncated, cap };
   }
 
   // --- search ---

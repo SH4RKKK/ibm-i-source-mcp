@@ -112,6 +112,7 @@ A real environment variable, if one is set, always takes precedence over a value
 | `IBMI_MAPEPIRE_JAR` | no | | path to a mapepire jar already on the box, instead of the bundled one |
 | `IBMI_READ_ONLY` | no | `false` | `true` disables upload and compile (read, search, and list only) |
 | `IBMI_BLOCKED_CL` | no | | extra CL verbs to refuse as a compile command, comma separated |
+| `IBMI_BLOCKED_TABLES` | no | | tables `run_sql` must refuse, comma separated. List both the SQL name and the system name |
 
 ### Multiple servers
 
@@ -146,6 +147,7 @@ All `.env` and `.env.*` files are git-ignored, only `.env.example` is committed.
 ### Read
 
 - **`read_source_member`**: downloads a member as clean UTF-8 to `ibmi-src/<lib>/<file>/<member>.<ext>`, where the extension is the member type. An untouched backup goes to `ibmi-src/.backup/` under the same tree and refreshes on every read, so the original is always recoverable. The result is the saved paths and the metadata, not the source text, so a large member does not flood the conversation.
+- **`run_sql`**: runs one select against Db2 for i, for the SQL catalog and for reading rows out of a data file. Every result carries each column's name and type. `maxRows` defaults to 10: `0` returns only the columns and their types, a few give sample data. `file: true` writes every row to `ibmi-src/sql/` as JSON and replies with only the path, the count and the types, so a whole config table never needs its row count guessed or passes through the conversation. The result says when it was truncated. Rows come back keyed by column name, so two columns with the same name, as in a `select *` over a join, must be given an alias. A query still running after 10 seconds is abandoned and the session reset, though Db2 may keep running it on the box. For that reason `qsys2.syspartitionindexstat` and `syspartitionindexes` are refused: filtered by index they run for minutes and nothing stops them once started. Use `qsys.qadbkfld` for the key fields of a file and `systools.related_objects` for the logical files over one.
 
 ### Library list
 
@@ -174,12 +176,13 @@ mid call, the call fails fast instead of hanging and the next one reconnects.
 
 ## Security
 
-This server logs into your IBM i over SSH and can read source, write source, and run compile
-commands. Treat it like any tool that can act on the box.
+This server logs into your IBM i over SSH and can read source and table rows, write source, and run
+compile commands. Treat it like any tool that can act on the box.
 
 - **Least privilege first.** The server has exactly the authority of the profile in the env file. Give it one with only the authority the work needs, never `QSECOFR`. Everything below is defense in depth.
-- **Read only mode.** `IBMI_READ_ONLY=true` allows read, search and list only. Upload and compile are refused.
+- **Read only mode.** `IBMI_READ_ONLY=true` allows read, search, list and `run_sql` only. Upload and compile are refused.
 - **Compile command guard.** The `command` override on `compile_member` runs as CL, so only `crt*` commands are allowed and a list of destructive verbs is refused. `IBMI_BLOCKED_CL` extends that list. See `assertCompileCommandAllowed` in [src/compile.ts](src/compile.ts).
+- **SQL is select only.** `run_sql` takes a statement from the model, so it is checked before it reaches Db2: one statement, starting with `select` or `with`, no comments, nothing that writes. Two less obvious writes are refused as well, `select * from final table (insert ...)` and `qsys2.qcmdexc` called as a function, which runs CL from inside a select. `IBMI_BLOCKED_TABLES` refuses named tables outright, for data that should never land in a conversation. Every table has two names, its SQL name and its 10 character system name, and blocking one does not block the other, so list both. A view or an alias over a blocked table gets past the check, so the profile's authority stays the real control. See `assertSelectOnly` in [src/util.ts](src/util.ts).
 - **Network.** The SSH host key is not checked, so reach the box over a VPN or an internal network rather than the open internet.
 - **Bundled jar integrity.** The mapepire jar is checked against a known SHA-256 before it is uploaded or run. The hash ships in the same package as the jar, so it catches corruption and local tampering, not a compromised release.
 - **Prompt injection.** Source, text descriptions and compile listings come back to the model as untrusted text. A member could contain text that tries to steer the assistant into an unwanted upload or compile. The controls above limit what that could actually do.
@@ -190,12 +193,12 @@ commands. Treat it like any tool that can act on the box.
 ```
 src/
   index.ts       tool registration and result formatting
-  mapepire.ts    the backend: read, search, list, write and compile, all as SQL
+  mapepire.ts    the backend: read, search, list, query, write and compile, all as SQL
   sshMapepire.ts SSH transport: runs the bundled mapepire jar in single mode
   config.ts      env file discovery and the Profile loader
   compile.ts     compile command templates, the CL guard, the EVFEVENT parser
   report.ts      progress and logging reporter (notifications, stall watchdog)
-  util.ts        source type to extension, SQL escaping, local copy writer
+  util.ts        source type to extension, SQL escaping, the run_sql guard and table, local copy writer
   types.ts       shared types and the Reporter interface
   selfcheck.ts   the whole test suite: node:test asserts over the pure functions
 scripts/

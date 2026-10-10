@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extFor, likeLiteral, parseFndstrpdm, typeFromPath } from "./util.js";
+import { assertSelectOnly, extFor, likeLiteral, parseFndstrpdm, sqlJson, textTable, typeFromPath, withTimeLimit } from "./util.js";
 import { loadProfile } from "./config.js";
 import { MapepireBackend, aliasStmt, memberMetaStmt, qcmdexc, validLibOrStar, validName } from "./mapepire.js";
 import { ToolReporter } from "./report.js";
@@ -190,6 +190,158 @@ test("memberMetaStmt answers ccsid, length, type, change date and existence in o
   assert.equal((s.match(/select/gi) || []).length, 1, "one statement, not two selects stitched together");
 });
 
+// --- run_sql guard ---
+test("assertSelectOnly allows the select shapes run_sql exists for", () => {
+  for (const ok of [
+    "select * from MYLIB.MYFILE",
+    "select * from mylib/myfile",
+    "select objname from table(qsys2.object_statistics('MYLIB', '*FILE'))",
+    "select sql_name from table(systools.related_objects(library_name => 'MYLIB', file_name => 'MYFILE'))",
+    "with c as (select 1 as n from sysibm.sysdummy1) select * from c",
+    "(select 1 from sysibm.sysdummy1) union (select 2 from sysibm.sysdummy1)",
+    "SeLeCt 1 from sysibm.sysdummy1",
+    "\n\n  select 1 from sysibm.sysdummy1",
+    "select * from MYLIB.MYFILE fetch first 5 rows only",
+    "select * from MYLIB.MYFILE with ur",
+  ]) assert.equal(assertSelectOnly(ok), ok.trim(), `${JSON.stringify(ok)} must be allowed`);
+  assert.equal(assertSelectOnly("select 1 from sysibm.sysdummy1;  "), "select 1 from sysibm.sysdummy1");
+});
+
+test("assertSelectOnly refuses every statement that is not a select", () => {
+  for (const bad of [
+    "insert into mylib.myfile values (1)", "update mylib.myfile set a = 1", "delete from mylib.myfile",
+    "merge into mylib.myfile using x on 1 = 1 when matched then delete", "drop table mylib.myfile",
+    "create table mylib.x (a int)", "alter table mylib.myfile add column b int",
+    "grant select on mylib.myfile to public", "revoke select on mylib.myfile from public",
+    "comment on table mylib.myfile is 'x'", "label on table mylib.myfile is 'x'", "call mylib.myproc()",
+    "set schema mylib", "lock table mylib.myfile in exclusive mode", "rename table mylib.myfile to x",
+    "truncate table mylib.myfile", "begin end", "declare global temporary table t (a int)", "values 1",
+    "selectx from t", "without c as (select 1) select 1",
+  ]) assert.throws(() => assertSelectOnly(bad), /only runs select/, `${JSON.stringify(bad)} must be refused`);
+});
+
+test("assertSelectOnly refuses a write hidden inside a select", () => {
+  for (const bad of [
+    "select * from final table (insert into mylib.myfile values (1))",
+    "select * from new table (insert into mylib.myfile values (1))",
+    "select * from old table (delete from mylib.myfile)",
+    "select * from final  table(insert into mylib.myfile values (1))",
+    "select * from final\ntable (insert into mylib.myfile values (1))",
+    "with c as (select 1 as n from sysibm.sysdummy1) insert into mylib.myfile select n from c",
+    "with c as (select 1 as n from sysibm.sysdummy1) delete from mylib.myfile",
+    "with c as (select 1 as n from sysibm.sysdummy1) update mylib.myfile set a = 1",
+    "with c as (select 1 as n from sysibm.sysdummy1) merge into mylib.myfile using c on 1 = 1 when matched then delete",
+  ]) assert.throws(() => assertSelectOnly(bad), /write inside a select/, `${JSON.stringify(bad)} must be refused`);
+});
+
+test("assertSelectOnly refuses the functions that make a select run CL, phone home or read the IFS", () => {
+  for (const bad of [
+    "select qsys2.qcmdexc('dltlib mylib') from sysibm.sysdummy1",
+    "select qsys2.qcmdexc\n('dltlib mylib') from sysibm.sysdummy1",
+    "select systools.httpgetclob('http://example.com', '') from sysibm.sysdummy1",
+    "select * from table(qsys2.ifs_read('/home/myuser/.ssh/id_rsa'))",
+  ]) assert.throws(() => assertSelectOnly(bad), /refusing to call/, `${JSON.stringify(bad)} must be refused`);
+  assert.doesNotThrow(() => assertSelectOnly("select http_status from mylib.mylog"), "a name with no call paren is a column");
+});
+
+test("assertSelectOnly refuses the two catalog views that run for minutes and cannot be stopped", () => {
+  for (const bad of [
+    "select * from qsys2.syspartitionindexstat where index_schema = 'MYLIB' and index_name = 'MYFILE'",
+    "select * from QSYS2.SYSPARTITIONINDEXES where index_schema = 'MYLIB'",
+  ]) assert.throws(() => assertSelectOnly(bad), /qsys\.qadbkfld/, `${JSON.stringify(bad)} must be refused with the fast route named`);
+  assert.doesNotThrow(() => assertSelectOnly("select * from qsys2.syspartitionstat where table_schema = 'MYLIB'"), "the member view is fast");
+});
+
+test("withTimeLimit gives up on slow work and runs the cleanup, and leaves fast work alone", async () => {
+  let reset = 0;
+  await assert.rejects(withTimeLimit(new Promise(() => {}), 20, () => reset++, "too slow"), /too slow/);
+  assert.equal(reset, 1, "the cleanup is what frees the session");
+  assert.equal(await withTimeLimit(Promise.resolve(42), 1000, () => reset++, "too slow"), 42);
+  assert.equal(reset, 1, "fast work must not trigger the cleanup");
+});
+
+test("assertSelectOnly refuses comments and inner semicolons, even inside a string literal", () => {
+  for (const bad of [
+    "-- x\nselect 1 from sysibm.sysdummy1",
+    "/* x */ select 1 from sysibm.sysdummy1",
+    "select * from final/**/table(insert into mylib.myfile values (1))",
+    "select * from mylib.myfile where text like '%--%'",
+  ]) assert.throws(() => assertSelectOnly(bad), /remove the comments/, `${JSON.stringify(bad)} must be refused`);
+  for (const bad of ["select 1 from sysibm.sysdummy1; delete from mylib.myfile", "select * from mylib.myfile where a = 'a;b'"])
+    assert.throws(() => assertSelectOnly(bad), /one statement/, `${JSON.stringify(bad)} must be refused`);
+});
+
+test("assertSelectOnly refuses a blocked table however it is qualified, and a listed schema too", () => {
+  for (const bad of [
+    "select * from mysecrets", "select * from MYLIB.MYSECRETS", "select * from mylib/mysecrets",
+    `select * from "MYSECRETS"`, "select * from mylib.myfile a join MySecrets b on a.k = b.k",
+  ]) assert.throws(() => assertSelectOnly(bad, ["mysecrets"]), /blocked by IBMI_BLOCKED_TABLES/, `${JSON.stringify(bad)} must be refused`);
+  for (const ok of ["select * from mysecrets2", "select * from xmysecrets"])
+    assert.doesNotThrow(() => assertSelectOnly(ok, ["mysecrets"]), `${ok} is a different name`);
+  assert.doesNotThrow(() => assertSelectOnly("select * from mysecrets"), "nothing is blocked by default");
+  assert.doesNotThrow(() => assertSelectOnly("select * from my#secrets", ["secrets"]), "# is part of an IBM i name, not an edge");
+  assert.throws(() => assertSelectOnly("select * from mypayroll.anyfile", ["mypayroll"]), /blocked by IBMI_BLOCKED_TABLES/);
+});
+
+// --- sql results ---
+const char = (name: string, precision: number) => ({ name, type: "CHAR", precision, scale: 0 });
+const varchar = (name: string, precision: number) => ({ name, type: "VARCHAR", precision, scale: 0 });
+
+test("textTable sizes every column to the widest of its name, its type and its values", () => {
+  const out = textTable([char("N", 10), varchar("TABLE_TEXT", 50)],
+    [{ N: "MYFILE", TABLE_TEXT: "Order headers" }, { N: "A", TABLE_TEXT: "Order detail lines" }]).split("\n");
+  assert.equal(out[0], "N" + " ".repeat(9) + "TABLE_TEXT");
+  assert.equal(out[1], "CHAR(10)  VARCHAR(50)");
+  assert.equal(out[2], "-".repeat(8) + "  " + "-".repeat(18));
+  assert.equal(out[4], "A" + " ".repeat(9) + "Order detail lines");
+});
+
+test("textTable prints the names, types and rule for a result with no rows, so an empty select still shows its shape", () => {
+  assert.equal(textTable([char("N", 10), varchar("TABLE_TEXT", 50)], []),
+    "N" + " ".repeat(9) + "TABLE_TEXT\nCHAR(10)  VARCHAR(50)\n" + "-".repeat(8) + "  " + "-".repeat(11));
+});
+
+test("textTable formats a type with its length, and its scale only when it has one", () => {
+  const out = textTable([varchar("A", 10), { name: "B", type: "DECIMAL", precision: 9, scale: 2 }], []).split("\n");
+  assert.equal(out[1], "VARCHAR(10)  DECIMAL(9,2)");
+});
+
+test("textTable right aligns by declared type, not by value", () => {
+  const out = textTable([{ name: "AMT", type: "DECIMAL", precision: 11, scale: 2 }, char("CODE", 3)],
+    [{ AMT: "5.00", CODE: "7" }, { AMT: "12345.50", CODE: "123" }]).split("\n");
+  assert.equal(out[3], " ".repeat(9) + "5.00  7", "a decimal arriving as a string still right aligns, char digits stay left");
+  assert.equal(out[4], " ".repeat(5) + "12345.50  123");
+});
+
+test("textTable prints null and a missing value as -, and an empty string as blank", () => {
+  const cols = [char("A", 1), char("B", 1)];
+  assert.equal(textTable(cols, [{ A: null, B: "" }]).split("\n")[3], "-");
+  assert.equal(textTable(cols, [{ A: "x" }]).split("\n")[3], "x" + " ".repeat(8) + "-");
+});
+
+test("textTable strips CHAR padding and keeps one row on one line", () => {
+  const out = textTable([char("MBR", 10), varchar("TEXT", 50)], [{ MBR: "MYPGM     ", TEXT: "line one\nline two" }]).split("\n");
+  assert.equal(out.length, 4, "one row must print as one line");
+  assert.equal(out[3], "MYPGM" + " ".repeat(5) + "line one line two");
+});
+
+test("textTable cuts a very wide value with a visible mark", () => {
+  const row = textTable([varchar("T", 500)], [{ T: "x".repeat(500) }]).split("\n")[3];
+  assert.equal(row.length, 60);
+  assert.ok(row.endsWith("…"), "the cut has to show");
+});
+
+test("textTable says so when there are no columns at all", () => {
+  assert.equal(textTable([], []), "(no columns)");
+});
+
+test("sqlJson parses back to the same columns and rows, one row per line", () => {
+  const cols = [{ name: "A", type: "INTEGER", precision: 10, scale: 0 }];
+  const s = sqlJson(cols, [{ A: 1 }, { A: 2 }]);
+  assert.deepEqual(JSON.parse(s), { columns: cols, rows: [{ A: 1 }, { A: 2 }] });
+  assert.equal(s.trimEnd().split("\n").length, 4, "so an agent can read part of the file by line");
+  assert.deepEqual(JSON.parse(sqlJson(cols, [])).rows, []);
+});
 
 // --- config ---
 test("loadProfile reads env and applies defaults", () => {
@@ -199,12 +351,14 @@ test("loadProfile reads env and applies defaults", () => {
   assert.equal(p.sourceFileCcsid, 37);
   assert.equal(p.readOnly, false);
   assert.deepEqual(p.blockedCl, []);
+  assert.deepEqual(p.blockedTables, []);
 });
 
 test("loadProfile parses safety options", () => {
-  const p = loadProfile({ ...baseEnv, IBMI_READ_ONLY: "true", IBMI_BLOCKED_CL: "crtpf, dltf" });
+  const p = loadProfile({ ...baseEnv, IBMI_READ_ONLY: "true", IBMI_BLOCKED_CL: "crtpf, dltf", IBMI_BLOCKED_TABLES: "MYSECRETS, mylib.mypasswords" });
   assert.equal(p.readOnly, true);
   assert.deepEqual(p.blockedCl, ["crtpf", "dltf"]);
+  assert.deepEqual(p.blockedTables, ["mysecrets", "mylib.mypasswords"]);
 });
 
 test("IBMI_READ_ONLY fails closed, so a stray space cannot unlock the box", () => {
@@ -279,6 +433,11 @@ test("buildLibraryListCommands builds the right CL per action", () => {
 test("changeLibraryList is refused in read-only mode (before any connect)", async () => {
   const be = new MapepireBackend(loadProfile({ ...baseEnv, IBMI_READ_ONLY: "true" }));
   await assert.rejects(() => be.changeLibraryList("add", { library: "MYLIB" }), /read-only/);
+});
+
+test("runSql refuses a non select before any connect, so it never reaches the box", async () => {
+  const be = new MapepireBackend(loadProfile(baseEnv));
+  await assert.rejects(() => be.runSql("delete from mylib.myfile"), /only runs select/);
 });
 
 // --- reporter ---

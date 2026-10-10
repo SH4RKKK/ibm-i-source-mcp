@@ -8,6 +8,7 @@ export interface Profile {
   mapepireJar?: string;          // override jar path on the box (else the uploaded copy)
   readOnly: boolean;             // when true, upload and compile are refused (default false)
   blockedCl: string[];           // extra destructive CL verbs to block on compile, on top of the defaults
+  blockedTables: string[];
 }
 
 // --- reporting ---
@@ -47,6 +48,9 @@ export interface SearchMatch {
 }
 
 export interface SearchResult { matches: SearchMatch[]; truncated: boolean; }
+
+// --- sql ---
+export interface SqlColumn { name: string; type: string; precision: number; scale: number; }
 
 // --- library list ---
 export type LibraryListAction = "add" | "remove" | "set_current" | "replace";

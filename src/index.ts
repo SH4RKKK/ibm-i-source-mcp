@@ -7,7 +7,7 @@ import { z } from "zod";
 import { listServers, loadProfileFor } from "./config.js";
 import { MapepireBackend } from "./mapepire.js";
 import { makeReporter, type ToolExtra, type ToolReporter } from "./report.js";
-import { findLocalCopy, typeFromPath, writeLocalCopy } from "./util.js";
+import { findLocalCopy, sqlJson, textTable, typeFromPath, writeLocalCopy, writeSqlFile } from "./util.js";
 
 // --- runtime ---
 console.log = (...a: unknown[]) => console.error(...a); // stdout is the JSON-RPC channel
@@ -169,6 +169,25 @@ tool(
     const lines = members.map((m) => `${m.sourceFile}(${m.name}) [${m.type || "?"}]${m.text ? `: ${m.text}` : ""}`);
     const head = `${members.length} member(s) in ${library}${sourceFile ? `/${sourceFile}` : ""}${filter ? ` matching "${filter}"` : ""}:\n\n`;
     return head + (lines.join("\n") || "(none)");
+  },
+);
+
+tool(
+  "run_sql",
+  "Run one select against Db2 for i, for the SQL catalog and for reading rows out of a data file. Anything that is not a select is refused before it reaches the box, and so are tables listed in IBMI_BLOCKED_TABLES. Every result carries each column's name and type. maxRows sets how many rows come back, default 10: pass 0 for the columns and types only, or a few for sample data. To get every row, for example all of an application's config, pass file: true, which writes them as JSON under ibmi-src/sql/ and replies with the path, the count and the types, not the rows. For the key fields of a file, in key order, use qsys.qadbkfld, and for the logical files over a file use systools.related_objects. A query still running after 10 seconds is abandoned and the session reset, so keep selects narrow. Use list_libraries, list_source_files and list_members for what they already answer. The text table trims the blanks Db2 pads CHAR columns with, prints null as -, and cuts values over 60 characters, so pass json: true for exact values inline.",
+  {
+    statement: z.string().describe("one select, e.g. select * from MYLIB.MYFILE where MYFLD = 'A'. Comments and inner semicolons are refused."),
+    maxRows: z.number().int().nonnegative().optional().describe("rows to return, default 10, or every row with file: true. 0 returns the columns and types only. At most 100000"),
+    file: z.boolean().optional().describe("write every row to a JSON file under ibmi-src/sql/ and reply with only the path, the count and the types (default false)"),
+    json: z.boolean().optional().describe("return { columns, rows } inline as JSON instead of a text table, for exact values (default false)"),
+    server: serverArg,
+  },
+  async ({ statement, maxRows, file, json, server }, r) => {
+    const be = getBackend(server);
+    const { rows, columns, truncated, cap } = await be.runSql(statement, maxRows ?? (file ? Infinity : undefined), r);
+    const count = `${rows.length} row(s)${truncated ? ` (truncated at ${cap}, raise maxRows or narrow the select)` : ""}`;
+    if (file) return `${count} written to ${writeSqlFile(LOCAL_DIR, sqlJson(columns, rows))}\n\n${textTable(columns, [])}`;
+    return `${count}:\n\n${json ? sqlJson(columns, rows) : textTable(columns, rows)}`;
   },
 );
 
