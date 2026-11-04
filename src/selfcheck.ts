@@ -195,8 +195,8 @@ test("memberMetaStmt answers ccsid, length, type, change date and existence in o
   assert.equal((s.match(/select/gi) || []).length, 1, "one statement, not two selects stitched together");
 });
 
-// --- run_sql guard ---
-test("assertSelectOnly allows the select shapes run_sql exists for", () => {
+// --- run_system_sql guard ---
+test("assertSelectOnly allows the select shapes run_system_sql exists for", () => {
   for (const ok of [
     "select * from QSYS2.SYSTABLES",
     "select * from qsys/qadbkfld",

@@ -173,7 +173,7 @@ tool(
 );
 
 tool(
-  "run_sql",
+  "run_system_sql",
   "Run one select against the IBM i system catalog and services, to document how files and objects are built, such as the files in a library, their columns, keys and dependencies, and object properties. Every table and function it reads must be in a system schema (QSYS, QSYS2, SYSIBM, SYSIBMADM or SYSTOOLS), so the rows of a user table are always refused, and so are services that return data contents such as journal entries, spool files, data queues and data areas. Anything that is not a select is refused before it reaches the box. Every result carries each column's name and type. maxRows sets how many rows come back, default 10, and 0 returns only the columns and types. To get every row, for example every column of every file in a library, pass file: true, which writes them as JSON under ibmi-src/sql/ and replies with the path, the count and the types, not the rows. For the key fields of a file, in key order, use qsys.qadbkfld, and for the logical files over a file use systools.related_objects. A query still running after 10 seconds is abandoned and the session reset, so keep selects narrow. Use list_libraries, list_source_files and list_members for what they already answer. The text table trims the blanks Db2 pads CHAR columns with, prints null as -, and cuts values over 60 characters, so pass json: true for exact values inline.",
   {
     statement: z.string().describe("one select over the system catalog, e.g. select column_name, data_type, length from qsys2.syscolumns where table_schema = 'MYLIB' and table_name = 'MYFILE'. Comments and inner semicolons are refused."),

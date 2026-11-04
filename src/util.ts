@@ -20,7 +20,7 @@ export function likeLiteral(term: string): string {
   return term.replace(/'/g, "''").replace(/[\\%_]/g, "\\$&").toUpperCase();
 }
 
-// --- run_sql guard ---
+// --- run_system_sql guard ---
 const SELECT_START = /^[(\s]*(?:select|with)\b/i;
 const WRITES = /\b(?:insert\s+into|delete\s+from|merge\s+into|update\s+\S+\s+set|(?:final|new|old)\s+table\s*\()/i;
 // system functions that run CL, call out of the box, or read IFS files
@@ -33,14 +33,14 @@ export const SYSTEM_SCHEMAS = ["QSYS", "QSYS2", "SYSIBM", "SYSIBMADM", "SYSTOOLS
 export function assertSelectOnly(statement: string): string {
   const sql = statement.trim().replace(/;\s*$/, "");
   if (!sql) throw new Error("empty sql statement");
-  if (/--|\/\*/.test(sql)) throw new Error("remove the comments (-- and /* */), run_sql refuses a statement carrying any");
-  if (sql.includes(";")) throw new Error(`run_sql takes one statement, remove the ";"`);
-  if (!SELECT_START.test(sql)) throw new Error(`run_sql only runs select, "${sql.replace(/^[(\s]+/, "").split(/[\s(]+/)[0].toLowerCase()}" is not one`);
+  if (/--|\/\*/.test(sql)) throw new Error("remove the comments (-- and /* */), run_system_sql refuses a statement carrying any");
+  if (sql.includes(";")) throw new Error(`run_system_sql takes one statement, remove the ";"`);
+  if (!SELECT_START.test(sql)) throw new Error(`run_system_sql only runs select, "${sql.replace(/^[(\s]+/, "").split(/[\s(]+/)[0].toLowerCase()}" is not one`);
   if (WRITES.test(sql)) throw new Error("refusing a write inside a select");
   const fn = REFUSED_FN.exec(sql);
-  if (fn) throw new Error(`refusing to call ${fn[1].toLowerCase()}() from run_sql`);
+  if (fn) throw new Error(`refusing to call ${fn[1].toLowerCase()}() from run_system_sql`);
   const data = DATA.exec(sql);
-  if (data) throw new Error(`refusing ${data[1].toLowerCase()}, it returns the contents of data and run_sql only reads system information`);
+  if (data) throw new Error(`refusing ${data[1].toLowerCase()}, it returns the contents of data and run_system_sql only reads system information`);
   const slow = RUNAWAY.exec(sql);
   if (slow) throw new Error(`refusing ${slow[0].toLowerCase()}, it can run for minutes and nothing stops it once it starts. Use qsys.qadbkfld for the key fields of a file, and systools.related_objects for the logical files over one`);
   return sql;
@@ -48,16 +48,16 @@ export function assertSelectOnly(statement: string): string {
 
 // checks the object references qsys2.parse_statement reports for a statement
 export function assertSystemOnly(refs: SqlRef[]): void {
-  if (!refs.length) throw new Error("could not tell what this select reads, so run_sql refuses it");
+  if (!refs.length) throw new Error("could not tell what this select reads, so run_system_sql refuses it");
   const schemas = SYSTEM_SCHEMAS.join(", ");
   for (const r of refs) {
-    if (r.statement !== "QUERY") throw new Error(`refusing a ${r.statement.toLowerCase()} statement, run_sql only reads`);
+    if (r.statement !== "QUERY") throw new Error(`refusing a ${r.statement.toLowerCase()} statement, run_system_sql only reads`);
     if (r.type === "COLUMN") continue;
-    if (r.usage !== "QUERY") throw new Error(`refusing ${r.name}, it is used as a ${r.usage.toLowerCase()} and run_sql only reads`);
+    if (r.usage !== "QUERY") throw new Error(`refusing ${r.name}, it is used as a ${r.usage.toLowerCase()} and run_system_sql only reads`);
     // unqualified functions are the built ins, such as rtrim and count
     if (r.type === "FUNCTION" && !r.schema) continue;
-    if (!r.schema) throw new Error(`qualify ${r.name} with its schema, run_sql only reads system information in ${schemas}`);
-    if (!SYSTEM_SCHEMAS.includes(r.schema)) throw new Error(`refusing ${r.schema}.${r.name}, run_sql only reads system information in ${schemas}, never the rows of a user table`);
+    if (!r.schema) throw new Error(`qualify ${r.name} with its schema, run_system_sql only reads system information in ${schemas}`);
+    if (!SYSTEM_SCHEMAS.includes(r.schema)) throw new Error(`refusing ${r.schema}.${r.name}, run_system_sql only reads system information in ${schemas}, never the rows of a user table`);
   }
 }
 

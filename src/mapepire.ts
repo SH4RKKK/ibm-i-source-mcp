@@ -231,11 +231,11 @@ export class MapepireBackend {
        from table(qsys2.parse_statement(?, '*SYS', '*PERIOD', '*APOSTSQL'))`, [sql]);
     assertSystemOnly(refs.map((r) => ({ type: r.NAME_TYPE, schema: r.SCHEMA ?? null, name: r.NAME, usage: r.USAGE_TYPE, statement: r.SQL_STATEMENT_TYPE })));
     const { rows, columns, truncated } = await withTimeLimit(this.fetchRows(sql, cap), SQL_TIME_LIMIT_MS, () => void this.close(),
-      `run_sql gave up after ${SQL_TIME_LIMIT_MS / 1000}s and reset the session, so the query may still be running on the box. Narrow the select. The next call reconnects, and any manage_library_list change is gone`);
+      `run_system_sql gave up after ${SQL_TIME_LIMIT_MS / 1000}s and reset the session, so the query may still be running on the box. Narrow the select. The next call reconnects, and any manage_library_list change is gone`);
     const names = columns.map((c) => c.name);
     const dup = names.find((n, i) => names.indexOf(n) !== i);
     if (dup) throw new Error(`two columns are named ${dup}, give one an alias with as`);
-    reporter.log("info", `run_sql returned ${rows.length} row(s)${truncated ? `, truncated at ${cap}` : ""}`);
+    reporter.log("info", `run_system_sql returned ${rows.length} row(s)${truncated ? `, truncated at ${cap}` : ""}`);
     return { rows, columns, truncated, cap };
   }
 
