@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assertSelectOnly, assertSystemOnly, extFor, likeLiteral, parseFndstrpdm, sqlJson, textTable, typeFromPath, withTimeLimit } from "./util.js";
+import { assertSelectOnly, assertSystemOnly, extFor, likeLiteral, parseFndstrpdm, readsSpool, sqlJson, textTable, typeFromPath, withTimeLimit } from "./util.js";
 import { loadProfile } from "./config.js";
 import { MapepireBackend, aliasStmt, memberMetaStmt, qcmdexc, spoolListStmt, validLibOrStar, validName } from "./mapepire.js";
 import { ToolReporter } from "./report.js";
@@ -260,17 +260,15 @@ test("assertSelectOnly refuses the system services that return the contents of d
   ]) assert.throws(() => assertSelectOnly(bad), /contents of data/, `${JSON.stringify(bad)} must be refused`);
 });
 
-test("assertSelectOnly reads job logs from the spool and refuses every other spooled file", () => {
-  const joblog = "select ordinal_position, spooled_data from table(systools.spooled_file_data(job_name => '123456/MYUSER/MYPGM', spooled_file_name => 'QPJOBLOG', spooled_file_number => '1')) x where spooled_data like '%CPF%' order by ordinal_position";
-  assert.equal(assertSelectOnly(joblog), joblog);
-  assert.doesNotThrow(() => assertSelectOnly("select * from table(systools.spooled_file_data(job_name => '123456/MYUSER/MYPGM', spooled_file_name => 'qpjoblog')) x"));
-  for (const bad of [
-    "select * from table(systools.spooled_file_data(job_name => '123456/MYUSER/MYPGM', spooled_file_name => 'INVOICE')) x",
-    "select * from table(systools.spooled_file_data('123456/MYUSER/MYPGM', 'INVOICE')) x",
-    "select * from table(systools.spooled_file_data(job_name => trim('QPJOBLOG'), spooled_file_name => 'INVOICE')) x",
-    "select * from table(systools.\"SPOOLED_FILE_DATA\"(job_name => 'X', spooled_file_name => 'INVOICE')) x",
-    "select * from table(systools.spooled_file_data(job_name => 'X', spooled_file_name => 'QPJOBLOG')) a, table(systools.spooled_file_data(job_name => 'X', spooled_file_name => 'INVOICE')) b",
-  ]) assert.throws(() => assertSelectOnly(bad), /only job logs/, `${JSON.stringify(bad)} must be refused`);
+test("assertSelectOnly reads any spooled file, and readsSpool sends those rows to a file", () => {
+  for (const ok of [
+    "select ordinal_position, spooled_data from table(systools.spooled_file_data(job_name => '123456/MYUSER/MYPGM', spooled_file_name => 'QPJOBLOG', spooled_file_number => '1')) x order by ordinal_position",
+    "select * from table(systools.spooled_file_data('123456/MYUSER/MYPGM', 'MYREPORT')) x",
+  ]) {
+    assert.equal(assertSelectOnly(ok), ok);
+    assert.equal(readsSpool(ok), true);
+  }
+  assert.equal(readsSpool("select * from qsys2.systables"), false);
 });
 
 test("assertSelectOnly refuses the output_queue_entries view but not its table function", () => {

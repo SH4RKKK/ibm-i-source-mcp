@@ -7,10 +7,10 @@ import { z } from "zod";
 import { listServers, loadProfileFor } from "./config.js";
 import { MapepireBackend } from "./mapepire.js";
 import { makeReporter, type ToolExtra, type ToolReporter } from "./report.js";
-import { findLocalCopy, sqlJson, textTable, typeFromPath, writeLocalCopy, writeSqlFile } from "./util.js";
+import { findLocalCopy, readsSpool, sqlJson, textTable, typeFromPath, writeLocalCopy, writeSqlFile } from "./util.js";
 
 // --- runtime ---
-console.log = (...a: unknown[]) => console.error(...a); // stdout is the JSON-RPC channel
+console.log = (...a: unknown[]) => console.error(...a);
 process.on("unhandledRejection", (r) => console.error("[ibm-i-source] unhandledRejection:", r));
 process.on("uncaughtException", (e) => console.error("[ibm-i-source] uncaughtException:", e));
 
@@ -174,19 +174,20 @@ tool(
 
 tool(
   "run_system_sql",
-  "Run one select against the IBM i system catalog and services, to document how files and objects are built, such as the files in a library, their columns, keys and dependencies, and object properties. Every table and function it reads must be in a system schema (QSYS, QSYS2, SYSIBM, SYSIBMADM or SYSTOOLS), so the rows of a user table are always refused, and so are services that return data contents such as journal entries, spool files, data queues and data areas. The one spool it reads is a job log, select spooled_data from table(systools.spooled_file_data(job_name => '123456/MYUSER/MYJOB', spooled_file_name => 'QPJOBLOG', spooled_file_number => '1')) x. To find a job's spool, list one output queue with table(qsys2.output_queue_entries('QUSRSYS', 'QEZJOBLOG', 'NO')), never the output_queue_entries view, which scans every queue and is refused. Anything that is not a select is refused before it reaches the box. Every result carries each column's name and type. maxRows sets how many rows come back, default 10, and 0 returns only the columns and types. To get every row, for example every column of every file in a library, pass file: true, which writes them as JSON under ibmi-src/sql/ and replies with the path, the count and the types, not the rows. For the key fields of a file, in key order, use qsys.qadbkfld, and for the logical files over a file use systools.related_objects. A query still running after 10 seconds is abandoned and the session reset, so keep selects narrow. Use list_libraries, list_source_files and list_members for what they already answer. The text table trims the blanks Db2 pads CHAR columns with, prints null as -, and cuts values over 60 characters, so pass json: true for exact values inline.",
+  "Run one select against the IBM i system catalog and services, to document how files and objects are built, such as the files in a library, their columns, keys and dependencies, and object properties. Every table and function it reads must be in a system schema (QSYS, QSYS2, SYSIBM, SYSIBMADM or SYSTOOLS), so the rows of a user table are always refused, and so are services that return data contents such as journal entries, data queues and data areas. Spool files are readable, select spooled_data from table(systools.spooled_file_data(job_name => '123456/MYUSER/MYJOB', spooled_file_name => 'QPJOBLOG', spooled_file_number => '1')) x, and a select that reads spool saves every row to a file as file: true does, unless file: false is passed. To find a job's spool, list one output queue with table(qsys2.output_queue_entries('QUSRSYS', 'QEZJOBLOG', 'NO')), never the output_queue_entries view, which scans every queue and is refused. Anything that is not a select is refused before it reaches the box. Every result carries each column's name and type. maxRows sets how many rows come back, default 10, and 0 returns only the columns and types. To get every row, for example every column of every file in a library, pass file: true, which writes them as JSON under ibmi-src/sql/ and replies with the path, the count and the types, not the rows. For the key fields of a file, in key order, use qsys.qadbkfld, and for the logical files over a file use systools.related_objects. A query still running after 10 seconds is abandoned and the session reset, so keep selects narrow. Use list_libraries, list_source_files and list_members for what they already answer. The text table trims the blanks Db2 pads CHAR columns with, prints null as -, and cuts values over 60 characters, so pass json: true for exact values inline.",
   {
     statement: z.string().describe("one select over the system catalog, e.g. select column_name, data_type, length from qsys2.syscolumns where table_schema = 'MYLIB' and table_name = 'MYFILE'. Comments and inner semicolons are refused."),
-    maxRows: z.number().int().nonnegative().optional().describe("rows to return, default 10, or every row with file: true. 0 returns the columns and types only. At most 100000"),
-    file: z.boolean().optional().describe("write every row to a JSON file under ibmi-src/sql/ and reply with only the path, the count and the types (default false)"),
+    maxRows: z.number().int().nonnegative().optional().describe("rows to return, default 10, or every row when the rows go to a file. 0 returns the columns and types only. At most 100000"),
+    file: z.boolean().optional().describe("write every row to a JSON file under ibmi-src/sql/ and reply with only the path, the count and the types (default true for a select that reads spool, false otherwise)"),
     json: z.boolean().optional().describe("return { columns, rows } inline as JSON instead of a text table, for exact values (default false)"),
     server: serverArg,
   },
   async ({ statement, maxRows, file, json, server }, r) => {
     const be = getBackend(server);
-    const { rows, columns, truncated, cap } = await be.runSql(statement, maxRows ?? (file ? Infinity : undefined), r);
+    const toFile = file ?? readsSpool(statement);
+    const { rows, columns, truncated, cap } = await be.runSql(statement, maxRows ?? (toFile ? Infinity : undefined), r);
     const count = `${rows.length} row(s)${truncated ? ` (truncated at ${cap}, raise maxRows or narrow the select)` : ""}`;
-    if (file) return `${count} written to ${writeSqlFile(LOCAL_DIR, sqlJson(columns, rows))}\n\n${textTable(columns, [])}`;
+    if (toFile) return `${count} written to ${writeSqlFile(LOCAL_DIR, sqlJson(columns, rows))}\n\n${textTable(columns, [])}`;
     return `${count}:\n\n${json ? sqlJson(columns, rows) : textTable(columns, rows)}`;
   },
 );
@@ -215,7 +216,6 @@ tool(
       r.step(`reading the local file ${sourcePath}`);
       body = readFileSync(sourcePath, "utf8");
     }
-    // read_source_member names copies <member>.<source type>, so the type is in the filename
     const type = memberType ?? (sourcePath ? typeFromPath(sourcePath) : undefined);
     const { warnings, created } = await be.writeMember(ref, body, r, { create, memberType: type, text });
     const warn = warnings.length ? `\nWarnings:\n- ${warnings.join("\n- ")}` : " No warnings.";
