@@ -48,7 +48,7 @@
   "author": "Saman",
   "license": "Apache-2.0",
   "dependencies": {
-    "@ibm/mapepire-js": "^0.6.1",
+    "@ibm/mapepire-js": "^1.1.0",
     "@modelcontextprotocol/sdk": "^1.19.0",
     "dotenv": "^16.4.7",
     "ssh2": "^1.17.0",

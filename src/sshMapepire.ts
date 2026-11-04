@@ -1,30 +1,27 @@
 import { createHash } from "node:crypto";
-import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, type ClientChannel, type SFTPWrapper } from "ssh2";
-import mapepire from "@ibm/mapepire-js";
+import mapepire, { type DaemonServer, type ServerRequest } from "@ibm/mapepire-js";
 import { NOOP_REPORTER, type Profile, type Reporter } from "./types.js";
 
-const { SQLJob } = mapepire;
+const { SQLJob, BaseTransport } = mapepire;
 type Job = InstanceType<typeof SQLJob>;
 
 // --- constants ---
 const BUNDLED_JAR = join(dirname(fileURLToPath(import.meta.url)), "..", "vendor", "mapepire-server.jar");
-const BUNDLED_JAR_VERSION = "2.3.5"; // vendor/mapepire-server.jar, bump with BUNDLED_JAR_SHA256 below
-const BUNDLED_JAR_SHA256 = "41b1cfa67778ac204426f1dda0b51bd3f45fe3b89c91121d968660140acc0876";
+const BUNDLED_JAR_VERSION = "2.5.1";
+const BUNDLED_JAR_SHA256 = "e7fe8d4840b1fc6e830ff00622c8245a3d70b342333749aabbe513f0b146562b";
 const REMOTE_DIR = ".ibm-i-source-mcp";
 const CONNECT_TIMEOUT_MS = 10_000;
-const MAPEPIRE_TIMEOUT_MS = 60_000; // a cold jvm on IBM i can take most of a minute
-// turns off PASE and Java stdio conversion so our UTF-8 JSON is not mangled to the job ccsid.
-// Inline prefixes because IBM i sshd drops channel env vars.
+const MAPEPIRE_TIMEOUT_MS = 60_000;
 const JAVA_ENV = "QIBM_JAVA_STDIO_CONVERT=N QIBM_PASE_DESCRIPTOR_STDIO=B QIBM_USE_DESCRIPTOR_STDIO=Y QIBM_MULTI_THREADED=Y";
 
 // --- helpers ---
 const mb = (n: number) => (n / 1048576).toFixed(1);
-const beat = (fn: () => void, ms: number): NodeJS.Timeout => { const t = setInterval(fn, ms); t.unref?.(); return t; }; // unref: never hold the process open
+const beat = (fn: () => void, ms: number): NodeJS.Timeout => { const t = setInterval(fn, ms); t.unref?.(); return t; };
 const cb = <T>(f: (k: (e: any, v: T) => void) => void) => new Promise<T>((res, rej) => f((e, v) => (e ? rej(e) : res(v))));
 
 let jarVerified = false;
@@ -35,7 +32,6 @@ function verifyBundledJar(): void {
   jarVerified = true;
 }
 
-// ssh2's structured `level` and errno first, the message regexes only as a fallback if it rewords.
 function describeConnectError(e: Error, where: string, user: string, afterSecs: number): Error {
   const msg = e?.message || String(e);
   const code = (e as NodeJS.ErrnoException)?.code;
@@ -48,30 +44,48 @@ function describeConnectError(e: Error, where: string, user: string, afterSecs: 
   return new Error(`cannot connect to ${where}: ${msg}`);
 }
 
-// --- socket ---
-// A WebSocket shaped shim over the ssh2 exec stream: SQLJob uses only send/close and the
-// message/error/close events. Responses are newline delimited JSON.
-class StreamSocket extends EventEmitter {
+// --- transport ---
+// mapepire's Transport over the ssh2 exec stream, one JSON request or response per line
+class StreamTransport extends BaseTransport {
   private buf = "";
-  stderr = "";
-  constructor(private stream: ClientChannel) {
+  private stderr = "";
+  ready = false;
+  constructor(private stream: ClientChannel, private conn: Client, private host: string) {
     super();
+    this.connected = true;
     stream.on("data", (d: Buffer) => {
       this.buf += d.toString("utf8");
       let nl: number;
       while ((nl = this.buf.indexOf("\n")) >= 0) {
         const line = this.buf.slice(0, nl).trim();
         this.buf = this.buf.slice(nl + 1);
-        if (line) this.emit("message", line);
+        try { if (line) this.emitResponse(JSON.parse(line)); }
+        catch { /* startup banner or a log line that is not json: ignore */ }
       }
     });
     stream.stderr?.on("data", (d: Buffer) => { this.stderr = (this.stderr + d.toString("utf8")).slice(-4000); });
-    stream.on("error", (e: Error) => this.emit("error", e));
-    stream.on("close", (...a: unknown[]) => this.emit("close", ...a));
+    stream.on("close", () => {
+      this.connected = false;
+      for (const e of this.responseEmitter.eventNames())
+        if (String(e).endsWith("_conn_fail")) this.responseEmitter.emit(e, this.lost());
+    });
   }
-  send(data: string): void { this.stream.write(data + "\n"); }
-  close(): void { try { this.stream.end(); } catch { /* already gone */ } }
   get tail(): string { return this.stderr ? `: ${this.stderr.trim()}` : ""; }
+  lost(): Error {
+    return new Error(this.ready
+      ? `connection to ${this.host} lost: the ssh session closed. The next call reconnects automatically.`
+      : `mapepire process exited before connecting${this.tail}`);
+  }
+  async connect(): Promise<void> {}
+  async send(request: ServerRequest): Promise<void> {
+    if (!this.connected) return this.emitConnectionFailure(request.id, this.lost());
+    this.stream.write(JSON.stringify(request) + "\n");
+  }
+  async close(): Promise<void> {
+    this.connected = false;
+    try { this.stream.end(); } catch { /* already gone */ }
+    this.conn.end();
+  }
 }
 
 // --- connect ---
@@ -115,32 +129,18 @@ async function ensureJar(conn: Client, reporter: Reporter): Promise<string> {
   }
 }
 
-type ConnectReply = { success?: boolean; error?: string };
-
-// Races the connect reply against the jvm never answering and against the process dying first,
-// either of which would otherwise hang until the box is rebooted.
-async function handshake(j: any, socket: StreamSocket, hostKey: string, reporter: Reporter): Promise<ConnectReply> {
-  // single mode connects as the ssh user, so no host/user/password, only jdbc options.
-  // technique "tcp" matches Code for IBM i (cli breaks on ccsid 65535).
-  const props = Object.keys(j.options).map((k) => `${k}=${j.options[k]}`).join(";") || undefined;
-  const sent = j.send({ id: SQLJob.getNewUniqueId(), type: "connect", technique: "tcp", application: "ibm-i-source-mcp", props }) as Promise<ConnectReply>;
-
-  let onClose!: () => void;
-  const died = new Promise<never>((_, rej) => {
-    onClose = () => rej(new Error(`mapepire process exited before connecting${socket.tail}`));
-    socket.once("close", onClose);
-  });
+// sends the connect request, with a time limit on a jvm that never answers
+async function handshake(job: Job, transport: StreamTransport, profile: Profile, hostKey: string, reporter: Reporter): Promise<void> {
   let timer: NodeJS.Timeout;
-  const timeout = new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error(`mapepire connect timed out after ${MAPEPIRE_TIMEOUT_MS}ms${socket.tail}`)), MAPEPIRE_TIMEOUT_MS); });
-
+  const timeout = new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error(`mapepire connect timed out after ${MAPEPIRE_TIMEOUT_MS}ms${transport.tail}`)), MAPEPIRE_TIMEOUT_MS); });
   const t0 = Date.now();
   const hb = beat(() => reporter.step(`waiting for mapepire to answer on ${hostKey} (${Math.round((Date.now() - t0) / 1000)}s, gives up at ${MAPEPIRE_TIMEOUT_MS / 1000}s)`), 5000);
   try {
-    return await Promise.race([sent, timeout, died]);
+    const server: DaemonServer = { host: profile.host, user: profile.user };
+    await Promise.race([job.connect(server, "ibm-i-source-mcp"), timeout]);
   } finally {
     clearTimeout(timer!);
     clearInterval(hb);
-    socket.off("close", onClose);
   }
 }
 
@@ -152,24 +152,10 @@ export async function connectSshMapepire(profile: Profile, reporter: Reporter = 
     const jarPath = profile.mapepireJar ?? (await ensureJar(conn, reporter));
     reporter.step(`starting mapepire (java) on ${hostKey}, a cold jvm can take up to a minute`);
     const cmd = `${JAVA_ENV} java -Dos400.stdio.convert=N -jar ${jarPath} --single`;
-    const socket = new StreamSocket(await cb<ClientChannel>((k) => conn.exec(cmd, k)));
-
-    const job = new SQLJob();
-    const j = job as any; // socket/responseEmitter/options/status are private in TS, plain fields at runtime
-    j.options.naming = "system"; // the jdbc driver would otherwise default to sql naming
-    j.socket = socket;
-    socket.on("message", (line: string) => {
-      try { const m = JSON.parse(line); j.responseEmitter.emit(m.id, m); }
-      catch { /* startup banner or a log line that is not json: ignore */ }
-    });
-
-    const resp = await handshake(j, socket, hostKey, reporter);
-    if (resp?.success !== true) throw new Error(resp?.error || "mapepire connect failed");
-    socket.on("close", () => { j.status = "ended"; });
-    j.status = "ready";
-    j._sshConn = conn;
-    j._closed = new Promise<never>((_, rej) => socket.once("close", () => rej(new Error(`connection to ${profile.host} lost: the ssh session closed. The next call reconnects automatically.`))));
-    j._closed.catch(() => {}); // observed on demand via raceJobClosed
+    const transport = new StreamTransport(await cb<ClientChannel>((k) => conn.exec(cmd, k)), conn, profile.host);
+    const job = new SQLJob({ naming: "system" }, transport);
+    await handshake(job, transport, profile, hostKey, reporter);
+    transport.ready = true;
     reporter.log("info", `connected to ${hostKey} as ${profile.user} (mapepire over ssh)`);
     reporter.step(`connected to ${hostKey}`);
     return job;
@@ -177,17 +163,4 @@ export async function connectSshMapepire(profile: Profile, reporter: Reporter = 
     conn.end();
     throw e;
   }
-}
-
-// --- session ---
-export function raceJobClosed<T>(job: Job, p: Promise<T>): Promise<T> {
-  const closed = (job as any)._closed as Promise<never> | undefined;
-  return closed ? Promise.race([p, closed]) : p;
-}
-
-export async function closeSshMapepire(job?: Job): Promise<void> {
-  if (!job) return;
-  const conn: Client | undefined = (job as any)._sshConn;
-  await job.close?.().catch(() => {});
-  conn?.end();
 }

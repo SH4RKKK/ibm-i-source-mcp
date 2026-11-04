@@ -3,7 +3,7 @@ import type { CompileError, CompileOpts, CompileResult, LibraryListAction, Libra
 import { NOOP_REPORTER } from "./types.js";
 import { assertCompileCommandAllowed, buildCompileCommand, buildLibraryListCommands, parseEvfevent } from "./compile.js";
 import { assertSelectOnly, assertSystemOnly, likeLiteral, parseFndstrpdm, withTimeLimit } from "./util.js";
-import { closeSshMapepire, connectSshMapepire, raceJobClosed } from "./sshMapepire.js";
+import { connectSshMapepire } from "./sshMapepire.js";
 
 const { SQLJob } = mapepire;
 
@@ -70,7 +70,7 @@ export class MapepireBackend {
   }
 
   private async connect(reporter: Reporter = NOOP_REPORTER): Promise<InstanceType<typeof SQLJob>> {
-    if (this.job && (this.job as any).status !== "ended") return this.job;
+    if (this.job?.getTransport().isConnected()) return this.job;
     if (!this.connecting) {
       if (this.job) {
         reporter.log("notice", `connection to ${this.profile.host} was lost, reconnecting`);
@@ -91,10 +91,9 @@ export class MapepireBackend {
 
   private async fetchRows(statement: string, max: number, parameters?: any[]): Promise<{ rows: Row[]; columns: SqlColumn[]; truncated: boolean }> {
     const job = await this.connect();
-    const q = (job as any).query(statement, parameters ? { parameters } : undefined);
-    const rs: any = await raceJobClosed(job, q.execute(max + 1));
-    await q.close?.();
-    const columns = (rs.metadata?.columns ?? []).map((c: any) => ({ name: c.name, type: c.type, precision: c.precision, scale: c.scale }));
+    const q = job.query<Row>(statement, parameters ? { parameters } : undefined);
+    const rs = await q.execute(max + 1).finally(() => q.close().catch(() => {}));
+    const columns = (rs.metadata?.columns ?? []).map((c) => ({ name: c.name, type: c.type, precision: c.precision, scale: c.scale }));
     const data: Row[] = rs.has_results ? rs.data : [];
     return { rows: data.slice(0, max), columns, truncated: data.length > max };
   }
@@ -103,12 +102,8 @@ export class MapepireBackend {
     try { await this.sql(statement); } catch (e: any) { throw new Error(`${what} failed: ${e?.message || e}`); }
   }
 
-  private async clResult(command: string): Promise<any> {
-    const job = await this.connect();
-    const q = (job as any).query(command, { isClCommand: true });
-    const rs = await raceJobClosed(job, q.execute());
-    await q.close?.();
-    return rs;
+  private async clResult(command: string) {
+    return (await this.connect()).clcommand(command);
   }
 
   // --- read ---
@@ -435,7 +430,7 @@ export class MapepireBackend {
   }
 
   async close(): Promise<void> {
-    await closeSshMapepire(this.job);
+    await this.job?.close().catch(() => {});
     this.job = undefined;
     this.spoolReady = false;
   }
