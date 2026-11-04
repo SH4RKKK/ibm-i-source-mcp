@@ -1,7 +1,7 @@
 import mapepire from "@ibm/mapepire-js";
 import type { CompileError, CompileOpts, CompileResult, LibraryListAction, LibraryListChange, LibraryListEntry, MemberMeta, MemberRef, Profile, Reporter, SearchMatch, SearchOpts, SearchResult, SqlColumn } from "./types.js";
 import { NOOP_REPORTER } from "./types.js";
-import { assertCompileCommandAllowed, buildCompileCommand, buildLibraryListCommands, parseEvfevent } from "./compile.js";
+import { assertCompileCommandAllowed, buildCompileCommand, buildLibraryListCommands, parseEvfevent, withoutRejectedTgtccsid } from "./compile.js";
 import { assertSelectOnly, assertSystemOnly, likeLiteral, parseFndstrpdm, withTimeLimit } from "./util.js";
 import { connectSshMapepire } from "./sshMapepire.js";
 
@@ -50,6 +50,16 @@ export function memberMetaStmt(lib: string, srcf: string, mbr: string): string {
     where c.table_schema='${lib}' and c.table_name='${srcf}' and c.column_name='SRCDTA'`;
 }
 
+// lists the held spool carrying a tag, from one output queue when qsys2.spooled_file_info is missing
+export function spoolListStmt(tag: string, outq?: { lib: string; name: string }): string {
+  return outq
+    ? `select rtrim(spooled_file_name) as name, file_number as nbr, rtrim(job_name) as job
+         from table(qsys2.output_queue_entries('${outq.lib}', '${outq.name}', 'NO')) x
+        where user_data = '${tag}' and status = 'HELD' order by nbr`
+    : `select rtrim(spooled_file_name) as name, spooled_file_number as nbr, rtrim(qualified_job_name) as job
+         from table(qsys2.spooled_file_info(user_data => '${tag}', status => '*HELD')) order by nbr`;
+}
+
 export const qcmdexc = (command: string) => `call qsys2.qcmdexc('${command.replace(/'/g, "''")}')`;
 
 // --- backend ---
@@ -59,6 +69,7 @@ export class MapepireBackend {
   private chain: Promise<unknown> = Promise.resolve();
   private readonly splfTag = ("MCP" + Math.random().toString(36).slice(2).toUpperCase() + "0000000").slice(0, 10);
   private spoolReady = false;
+  private spoolOutq?: { lib: string; name: string };
 
   constructor(private profile: Profile) {}
 
@@ -355,15 +366,25 @@ export class MapepireBackend {
   // --- spool ---
   private async holdSpool(): Promise<void> {
     if (this.spoolReady) return;
-    await this.sql(qcmdexc(`ovrprtf file(*prtf) spool(*yes) hold(*yes) usrdta('${this.splfTag}') splfown(*curusrprf) ovrscope(*job)`));
+    this.spoolOutq = await this.legacySpoolOutq();
+    const outq = this.spoolOutq ? ` outq(${this.spoolOutq.lib}/${this.spoolOutq.name})` : "";
+    await this.sql(qcmdexc(`ovrprtf file(*prtf) spool(*yes) hold(*yes) usrdta('${this.splfTag}') splfown(*curusrprf)${outq} ovrscope(*job)`));
     this.spoolReady = true;
   }
 
+  // the user's own output queue, or QGPL/QPRINT, on a box without qsys2.spooled_file_info
+  private async legacySpoolOutq(): Promise<{ lib: string; name: string } | undefined> {
+    const modern = await this.sql(`select 1 as x from qsys2.sysroutines
+       where routine_schema = 'QSYS2' and routine_name = 'SPOOLED_FILE_INFO' fetch first 1 row only`);
+    if (modern.length) return undefined;
+    const [u] = await this.sql(`select rtrim(output_queue_library_name) as lib, rtrim(output_queue_name) as name
+       from qsys2.user_info where authorization_name = user`);
+    if (!u?.LIB || !u?.NAME || String(u.NAME).startsWith("*")) return { lib: "QGPL", name: "QPRINT" };
+    return { lib: validName(String(u.LIB), "output queue library"), name: validName(String(u.NAME), "output queue") };
+  }
+
   private async readTaggedSpool(): Promise<string[][]> {
-    const files = await this.sql(`select rtrim(spooled_file_name) as name, spooled_file_number as nbr,
-            rtrim(qualified_job_name) as job
-       from table(qsys2.spooled_file_info(user_data => '${this.splfTag}', status => '*HELD'))
-       order by nbr`);
+    const files = await this.sql(spoolListStmt(this.splfTag, this.spoolOutq));
     const out: string[][] = [];
     for (const f of files) {
       const rows = await this.sql(`select spooled_data from table(systools.spooled_file_data(
@@ -397,7 +418,7 @@ export class MapepireBackend {
       reporter.step(`detecting the member type of ${srclib}/${srcf}(${mbr})`);
       type = (await this.memberMeta(srclib, srcf, mbr)).type;
     }
-    const command = buildCompileCommand(type, { tgtlib, name, srclib, srcfile: srcf, mbr }, opts.command);
+    let command = buildCompileCommand(type, { tgtlib, name, srclib, srcfile: srcf, mbr }, opts.command);
     assertCompileCommandAllowed(command, this.profile.blockedCl);
 
     return this.serialize(async () => {
@@ -405,7 +426,13 @@ export class MapepireBackend {
       await this.dropTaggedSpool();
       reporter.log("info", `compile command: ${command}`);
       reporter.step(`compiling ${mbr} (${command.trim().split(/\s+/)[0]}) on ${this.profile.host}`);
-      const result = await this.clResult(command);
+      let result = await this.clResult(command);
+      const retry = opts.command || result.success !== false ? undefined : withoutRejectedTgtccsid(command, result.data?.map((m) => m.id) ?? []);
+      if (retry) {
+        reporter.log("notice", `${this.profile.host} does not accept tgtccsid, compiling without it`);
+        command = retry;
+        result = await this.clResult(command);
+      }
       const success = result?.success !== false;
       reporter.step(`compile ${success ? "succeeded" : "failed"}, fetching the compiler listing from spool`);
 

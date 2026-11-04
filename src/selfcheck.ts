@@ -2,32 +2,29 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { assertSelectOnly, assertSystemOnly, extFor, likeLiteral, parseFndstrpdm, sqlJson, textTable, typeFromPath, withTimeLimit } from "./util.js";
 import { loadProfile } from "./config.js";
-import { MapepireBackend, aliasStmt, memberMetaStmt, qcmdexc, validLibOrStar, validName } from "./mapepire.js";
+import { MapepireBackend, aliasStmt, memberMetaStmt, qcmdexc, spoolListStmt, validLibOrStar, validName } from "./mapepire.js";
 import { ToolReporter } from "./report.js";
-import { COMMAND_TEMPLATES, assertCompileCommandAllowed, buildCompileCommand, buildLibraryListCommands, parseEvfevent } from "./compile.js";
+import { COMMAND_TEMPLATES, assertCompileCommandAllowed, buildCompileCommand, buildLibraryListCommands, parseEvfevent, withoutRejectedTgtccsid } from "./compile.js";
 
-// the three variables a profile cannot do without, spread where a test adds more
+// the three variables a profile cannot do without
 const baseEnv: NodeJS.ProcessEnv = { IBMI_HOST: "h", IBMI_USER: "u", IBMI_PASSWORD: "pw" };
 
 // --- util ---
 test("typeFromPath recovers the source type a new member needs", () => {
-  // read_source_member saves <member>.<type>, so an upload that has to addpfm can take srctype from the file it is about to send.
   assert.equal(typeFromPath("ibmi-src/MYLIB/QDDSSRC/MYSCREEN.dspf"), "DSPF");
-  assert.equal(typeFromPath("C:\\work\\MYPGM.sqlrpgle"), "SQLRPGLE"); // a real windows path, \\w is not an escape
+  assert.equal(typeFromPath("C:\\work\\MYPGM.sqlrpgle"), "SQLRPGLE", "a real windows path");
   assert.equal(typeFromPath("MYPGM_reviewed.rpgle"), "RPGLE");
-  // .txt is what extFor emits when a member has no type: not a real srctype, so it must come back undefined and force the caller to pass one.
-  assert.equal(typeFromPath("notes.txt"), undefined);
-  // an editor leftover must not become a srctype: MYPGM.rpgle.bak once created a member of type BAK
+  assert.equal(typeFromPath("notes.txt"), undefined, "extFor gives .txt to a member with no type, which is no srctype");
   for (const leftover of ["MYPGM.rpgle.bak", "MYPGM.sqlrpgle.orig", "MYPGM.clle.tmp", "MYPGM.dspf.old"])
-    assert.equal(typeFromPath(leftover), undefined, leftover);
-  assert.equal(typeFromPath("MY.PGM.rpgle"), "RPGLE"); // a dot is legal in a member name
+    assert.equal(typeFromPath(leftover), undefined, `${leftover} is an editor leftover, not a srctype`);
+  assert.equal(typeFromPath("MY.PGM.rpgle"), "RPGLE", "a dot is legal in a member name");
   assert.equal(typeFromPath("README"), undefined);
-  assert.equal(typeFromPath("X" + extFor("CLLE")), "CLLE"); // round trip with its inverse
+  assert.equal(typeFromPath("X" + extFor("CLLE")), "CLLE", "round trip with extFor");
 });
 
 test("extFor uses the member type as the extension", () => {
   assert.equal(extFor("SQLRPGLE"), ".sqlrpgle");
-  assert.equal(extFor("DSPF"), ".dspf"); // display file, not .dds
+  assert.equal(extFor("DSPF"), ".dspf", "display file, not .dds");
   assert.equal(extFor("clle"), ".clle");
   assert.equal(extFor(""), ".txt");
 });
@@ -56,8 +53,7 @@ test("parseFndstrpdm reads the listing structurally, not by its English headings
     { member: "MYPGM", seqNbr: 11, line: "dcl-PI main;" },
     { member: "MYOTHER", seqNbr: 2.5, line: "dcl-s x char(10);" },
   ]);
-  // the change date sits past the ruler window, so it never lands in the source line
-  assert.ok(!parseFndstrpdm(listing, known, "DCL").some((m) => m.line.includes("02-06-26")));
+  assert.ok(!parseFndstrpdm(listing, known, "DCL").some((m) => m.line.includes("02-06-26")), "the change date sits past the ruler window");
 });
 
 test("parseFndstrpdm does not let a mark line rename the member it is marking", () => {
@@ -80,8 +76,6 @@ test("parseFndstrpdm keeps hits out when the member is not in the catalog list",
 });
 
 test("parseFndstrpdm drops hits from a member the catalog list excludes", () => {
-  // fndstrpdm scans mbr(*all) while `known` is already filtered by memberType, so a member of the
-  // wrong type appears in the listing. Its hits used to be reported under the previous member.
   const ruler = "    SEQNBR  " + "*...+....1....+....2....+....3" + " Last Changed Date";
   const hit = (seq: string, src: string) => seq.padStart(10) + "  " + src.padEnd(30) + "02-06-26";
   const listing = [
@@ -101,7 +95,6 @@ test("parseFndstrpdm drops hits from a member the catalog list excludes", () => 
 });
 
 test("parseFndstrpdm takes the member from the first known name in a block, not a later heading", () => {
-  // a Type heading reading RPGLE must not win when a member happens to be named RPGLE
   const ruler = "    SEQNBR  " + "*...+....1....+....2" + " Last Changed Date";
   const listing = [
     "Member  . . . . . . . :   MYPGM",
@@ -110,7 +103,7 @@ test("parseFndstrpdm takes the member from the first known name in a block, not 
     "       100  " + "belongs to MYPGM".padEnd(20),
   ];
   assert.deepEqual(parseFndstrpdm(listing, new Set(["MYPGM", "RPGLE"]), "belongs"),
-    [{ member: "MYPGM", seqNbr: 1, line: "belongs to MYPGM" }]);
+    [{ member: "MYPGM", seqNbr: 1, line: "belongs to MYPGM" }], "a Type heading reading RPGLE must not win over a member named RPGLE");
 });
 
 test("parseFndstrpdm keeps attributing across a page break that reprints the heading", () => {
@@ -130,10 +123,9 @@ test("parseFndstrpdm keeps attributing across a page break that reprints the hea
 });
 
 test("likeLiteral escapes the wildcards so a filter is a substring, not a pattern", () => {
-  // both backslashes are load bearing in the source: drop one and _ is a live wildcard again
-  assert.equal(likeLiteral("ord_100"), "ORD\\_100");  // literal _, would otherwise match ordx100
+  assert.equal(likeLiteral("ord_100"), "ORD\\_100", "a literal _, which would otherwise match ordx100");
   assert.equal(likeLiteral("50%"), "50\\%");
-  assert.equal(likeLiteral("a\\b"), "A\\\\B");        // the escape character itself
+  assert.equal(likeLiteral("a\\b"), "A\\\\B", "the escape character itself");
   assert.equal(likeLiteral("o'brien"), "O''BRIEN");
 });
 
@@ -143,7 +135,6 @@ test("validName is the trust boundary: names are spliced into SQL and CL, never 
   for (const bad of ["", "1ABC", "_ABC", "ABCDEFGHIJK", "MY LIB", "MY'LIB", "MY;LIB", "MY-LIB",
                      "MY/LIB", "MY(LIB", "MY*LIB", "MYLIB--", "МYLIB", "*CURLIB"])
     assert.throws(() => validName(bad, "library"), /invalid library/, `${JSON.stringify(bad)} must be rejected`);
-  // only validLibOrStar takes the special values, and it still falls back to validName
   assert.equal(validLibOrStar("*curlib", "targetLibrary"), "*CURLIB");
   assert.equal(validLibOrStar("MYLIB", "targetLibrary"), "MYLIB");
   assert.throws(() => validLibOrStar("*CUR LIB", "targetLibrary"), /invalid targetLibrary/);
@@ -157,7 +148,6 @@ test("every compile template substitutes fully, asks for events, and passes the 
     assert.ok(!cmd.includes("&"), `${type}: an unsubstituted token survived`);
     assert.equal(cmd.split(/\s+/)[0], cmd.split(/\s+/)[0].toLowerCase(), `${type}: the CL verb must be lowercase`);
     assert.doesNotThrow(() => assertCompileCommandAllowed(cmd), `${type}: blocked by its own guard`);
-    // *eventf is what writes EVFEVENT, without it a failed compile reports zero structured errors
     if (type !== "sql") assert.ok(cmd.includes("option(*eventf)"), `${type}: lost option(*eventf)`);
   }
 });
@@ -165,19 +155,34 @@ test("every compile template substitutes fully, asks for events, and passes the 
 // --- sql templates ---
 test("qcmdexc wraps a CL command as one SQL statement, doubling quotes for the literal", () => {
   assert.equal(qcmdexc("clrpfm file(L/F) mbr(M)"), "call qsys2.qcmdexc('clrpfm file(L/F) mbr(M)')");
-  // A CL literal already doubles its own quotes, and this level doubles them again, so a description reaches QCMDEXC with the pair it started with.
-  assert.equal(qcmdexc("addpfm file(L/F) mbr(M) srctype(RPGLE) text('it''s here')"), "call qsys2.qcmdexc('addpfm file(L/F) mbr(M) srctype(RPGLE) text(''it''''s here'')')");
+  assert.equal(qcmdexc("addpfm file(L/F) mbr(M) srctype(RPGLE) text('it''s here')"), "call qsys2.qcmdexc('addpfm file(L/F) mbr(M) srctype(RPGLE) text(''it''''s here'')')",
+    "the quotes a CL literal already doubled are doubled again");
 });
 
 test("aliasStmt guards only the drop, so a missing alias is fine but a bad create still raises", () => {
   const s = aliasStmt("MCPREAD", "MYLIB", "QRPGLESRC", "MYPGM");
-  // the handler sits in its own block around the drop, not around the create
-  assert.match(s, /begin\s+declare continue handler for sqlexception begin end;\s+execute immediate 'drop alias qtemp\.MCPREAD';\s+end;/);
+  assert.match(s, /begin\s+declare continue handler for sqlexception begin end;\s+execute immediate 'drop alias qtemp\.MCPREAD';\s+end;/, "the handler wraps only the drop");
   assert.match(s, /execute immediate 'create alias qtemp\.MCPREAD for MYLIB\.QRPGLESRC\(MYPGM\)'/);
   assert.ok(!s.includes("ovrdbf") && !s.includes("dltovr"), "no CL left in the read path");
   assert.ok(!s.includes("qcmdexc"), "nothing rides along when nothing was asked for");
-  // an extra statement rides along on the same round trip
-  assert.ok(aliasStmt("MCPWRITE", "MYLIB", "QRPGLESRC", "MYPGM", qcmdexc("clrpfm file(MYLIB/QRPGLESRC) mbr(MYPGM)")).includes("call qsys2.qcmdexc('clrpfm file(MYLIB/QRPGLESRC) mbr(MYPGM)');"));
+  assert.ok(aliasStmt("MCPWRITE", "MYLIB", "QRPGLESRC", "MYPGM", qcmdexc("clrpfm file(MYLIB/QRPGLESRC) mbr(MYPGM)")).includes("call qsys2.qcmdexc('clrpfm file(MYLIB/QRPGLESRC) mbr(MYPGM)');"),
+    "an extra statement rides along on the same round trip");
+});
+
+test("spoolListStmt lists one output queue when spooled_file_info is missing", () => {
+  const modern = spoolListStmt("MCPTAG");
+  assert.ok(modern.includes("qsys2.spooled_file_info(user_data => 'MCPTAG'") && !modern.includes("output_queue_entries"));
+  const legacy = spoolListStmt("MCPTAG", { lib: "QGPL", name: "QPRINT" });
+  assert.ok(legacy.includes("qsys2.output_queue_entries('QGPL', 'QPRINT', 'NO')") && !legacy.includes("spooled_file_info"));
+  assert.ok(legacy.includes("user_data = 'MCPTAG'") && legacy.includes("status = 'HELD'"));
+  for (const s of [modern, legacy]) assert.ok(/as name/.test(s) && /as nbr/.test(s) && /as job/.test(s), "same columns either way");
+});
+
+test("withoutRejectedTgtccsid drops the keyword only when the box rejected one", () => {
+  const cmd = buildCompileCommand("rpgle", { tgtlib: "MYLIB", name: "MYPGM", srclib: "MYLIB", srcfile: "QRPGLESRC", mbr: "MYPGM" });
+  assert.equal(withoutRejectedTgtccsid(cmd, ["CPD0043", "CPF0001"]), cmd.replace(" tgtccsid(*job)", ""));
+  assert.equal(withoutRejectedTgtccsid(cmd, ["CPF0001"]), undefined, "a compile that failed for another reason is not retried");
+  assert.equal(withoutRejectedTgtccsid(COMMAND_TEMPLATES.clle, ["CPD0043"]), undefined, "nothing to drop");
 });
 
 test("memberMetaStmt answers ccsid, length, type, change date and existence in one query", () => {
@@ -398,29 +403,26 @@ test("assertCompileCommandAllowed permits crt*/runsqlstm, blocks destructive and
   assert.doesNotThrow(() => assertCompileCommandAllowed("crtdspf file(L/N) srcfile(L/F) srcmbr(M)"));
   assert.doesNotThrow(() => assertCompileCommandAllowed("crtbndrpg pgm(MYLIB/MYPGM)"));
   assert.doesNotThrow(() => assertCompileCommandAllowed("runsqlstm srcfile(L/F) srcmbr(M)"));
-  // dlt* / clr* / rmv* families, matched by prefix
   assert.throws(() => assertCompileCommandAllowed("dltlib mylib"), /destructive/);
   assert.throws(() => assertCompileCommandAllowed("clrlib mylib"), /destructive/);
   assert.throws(() => assertCompileCommandAllowed("rmvm file(l/f) mbr(m)"), /destructive/);
-  assert.throws(() => assertCompileCommandAllowed("qsys/dltf file(l/f)"), /destructive/); // lib-qualified
-  // these come off the explicit verb list, not a prefix
+  assert.throws(() => assertCompileCommandAllowed("qsys/dltf file(l/f)"), /destructive/, "library qualified");
   assert.throws(() => assertCompileCommandAllowed("strsql"), /destructive/);
   assert.throws(() => assertCompileCommandAllowed("runqry qryfile(l/f)"), /destructive/);
   assert.throws(() => assertCompileCommandAllowed("call pgm(l/p)"), /destructive/);
-  assert.throws(() => assertCompileCommandAllowed("dsplib mylib"), /not a create/); // not crt*, not destructive
-  assert.throws(() => assertCompileCommandAllowed("crtpf file(l/f)", ["crtpf"]), /destructive/); // admin extra
+  assert.throws(() => assertCompileCommandAllowed("dsplib mylib"), /not a create/);
+  assert.throws(() => assertCompileCommandAllowed("crtpf file(l/f)", ["crtpf"]), /destructive/, "IBMI_BLOCKED_CL extends the list");
 });
 
 test("buildCompileCommand substitutes tokens; override wins; unknown type throws", () => {
   const cmd = buildCompileCommand("rpgle", { tgtlib: "*CURLIB", name: "MYPGM", srclib: "MYLIB", srcfile: "QRPGLESRC", mbr: "MYPGM" });
   assert.match(cmd, /^crtbndrpg pgm\(\*CURLIB\/MYPGM\) srcfile\(MYLIB\/QRPGLESRC\) srcmbr\(MYPGM\) option\(\*eventf\)/);
   assert.ok(!cmd.includes("&"), "all tokens replaced");
-  assert.equal(buildCompileCommand("rpgle", { tgtlib: "L", name: "N", srclib: "SL", srcfile: "SF", mbr: "M" }, "crtbndrpg pgm(L2/&name)"), "crtbndrpg pgm(L2/N)"); // override still gets token substitution
+  assert.equal(buildCompileCommand("rpgle", { tgtlib: "L", name: "N", srclib: "SL", srcfile: "SF", mbr: "M" }, "crtbndrpg pgm(L2/&name)"), "crtbndrpg pgm(L2/N)", "an override is substituted too");
   assert.throws(() => buildCompileCommand("weird", { tgtlib: "L", name: "N", srclib: "SL", srcfile: "SF", mbr: "M" }), /no compile template/);
 });
 
 test("parseEvfevent parses a real DDS ERROR record (severity, line, clean text), skips others", () => {
-  // The ERROR record is the real layout from a crtdspf failure. The FILEID line (which the parser skips) has its paths anonymized.
   const errs = parseEvfevent([
     "FILEID     0 001 000000 021 MYLIB/QDDSSRC(MYDSPF) 20260101120000 0",
     "ERROR      0 001 1 001700 000017 045 000017 045 CPD7484 E 20 200 Keyword not valid for this file type.",
@@ -428,9 +430,9 @@ test("parseEvfevent parses a real DDS ERROR record (severity, line, clean text),
   ]);
   assert.equal(errs.length, 1);
   assert.equal(errs[0].msgId, "CPD7484");
-  assert.equal(errs[0].severity, 20); // the number, not the "E" class letter
+  assert.equal(errs[0].severity, 20, "the number, not the class letter");
   assert.equal(errs[0].line, 17);
-  assert.equal(errs[0].text, "Keyword not valid for this file type."); // no stray length token
+  assert.equal(errs[0].text, "Keyword not valid for this file type.", "no stray length token");
 });
 
 test("parseEvfevent also handles an ERROR record with no severity-class letter", () => {
@@ -445,8 +447,7 @@ test("buildLibraryListCommands builds the right CL per action", () => {
   assert.deepEqual(buildLibraryListCommands("add", { library: "MYLIB", position: "first" }), ["addlible lib(MYLIB) position(*first)"]);
   assert.deepEqual(buildLibraryListCommands("remove", { library: "MYLIB" }), ["rmvlible lib(MYLIB)"]);
   assert.deepEqual(buildLibraryListCommands("set_current", { library: "MYLIB" }), ["chgcurlib curlib(MYLIB)"]);
-  // replace drops QTEMP (implicit) and can set the current library
-  assert.deepEqual(buildLibraryListCommands("replace", { libraries: ["A", "QTEMP", "B"], currentLibrary: "C" }), ["chglibl libl(A B) curlib(C)"]);
+  assert.deepEqual(buildLibraryListCommands("replace", { libraries: ["A", "QTEMP", "B"], currentLibrary: "C" }), ["chglibl libl(A B) curlib(C)"], "replace drops QTEMP");
   assert.deepEqual(buildLibraryListCommands("replace", { libraries: [] }), ["chglibl libl(*none)"]);
 });
 
@@ -465,11 +466,11 @@ test("runSql refuses a non select before any connect, so it never reaches the bo
 test("ToolReporter: progress values only ever increase, and bar phases stay aligned after steps", () => {
   const sent: { p: number; t?: number; m: string }[] = [];
   const r = new ToolReporter("t", { sendProgress: (p, t, m) => sent.push({ p, t, m }), sendLog: () => {} });
-  r.step("connect");        // 1, always sent
-  r.bar("scan a", 1, 3);    // throttled away (right after the step, not final)
-  r.bar("scan b", 3, 3);    // final bar of the phase, always sent: base 1 -> 4/4
-  r.step("done");           // 5
-  assert.equal(sent.length, 3);
+  r.step("connect");
+  r.bar("scan a", 1, 3);
+  r.bar("scan b", 3, 3);
+  r.step("done");
+  assert.equal(sent.length, 3, "the first bar is throttled, the final bar of a phase always goes out");
   for (let i = 1; i < sent.length; i++) assert.ok(sent[i].p > sent[i - 1].p, `progress must increase (${sent[i - 1].p} -> ${sent[i].p})`);
   assert.deepEqual(sent[1], { p: 4, t: 4, m: "scan b" });
 });

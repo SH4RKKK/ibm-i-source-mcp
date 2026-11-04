@@ -1,8 +1,6 @@
 import type { CompileError, LibraryListAction, LibraryListChange } from "./types.js";
 
 // --- library list ---
-// Names arrive validated and upper cased from the caller (the trust boundary), so they splice
-// straight in. QTEMP is implicit in every library list and chglibl refuses it, so a replace drops it.
 export function buildLibraryListCommands(action: LibraryListAction, a: LibraryListChange): string[] {
   switch (action) {
     case "add": return [`addlible lib(${a.library}) position(*${a.position ?? "last"})`];
@@ -17,7 +15,6 @@ export function buildLibraryListCommands(action: LibraryListAction, a: LibraryLi
 }
 
 // --- compile commands ---
-// option(*eventf) is what makes the compiler write the EVFEVENT file parseEvfevent reads back
 export const COMMAND_TEMPLATES: Record<string, string> = {
   rpgle: "crtbndrpg pgm(&tgtlib/&name) srcfile(&srclib/&srcfile) srcmbr(&mbr) option(*eventf) dbgview(*source) tgtccsid(*job)",
   sqlrpgle: "crtsqlrpgi obj(&tgtlib/&name) srcfile(&srclib/&srcfile) srcmbr(&mbr) option(*eventf) dbgview(*source) commit(*none) rpgppopt(*lvl2)",
@@ -37,15 +34,18 @@ export const COMMAND_TEMPLATES: Record<string, string> = {
 export interface CompileVars { tgtlib: string; name: string; srclib: string; srcfile: string; mbr: string }
 
 export function buildCompileCommand(type: string | undefined, v: CompileVars, override?: string): string {
-  const template = override || COMMAND_TEMPLATES[(type || "").toLowerCase()]; // an override is substituted too
+  const template = override || COMMAND_TEMPLATES[(type || "").toLowerCase()];
   if (!template) throw new Error(`no compile template for type "${type}", pass an explicit \`command\``);
   return template.replace(/&(tgtlib|name|srclib|srcfile|mbr)/g, (_, k: keyof CompileVars) => v[k]);
 }
 
+// the command without tgtccsid, when the box rejected a keyword of it (CPD0043)
+export function withoutRejectedTgtccsid(command: string, messageIds: (string | null)[]): string | undefined {
+  if (!messageIds.includes("CPD0043") || !/\btgtccsid\(/i.test(command)) return undefined;
+  return command.replace(/\s+tgtccsid\([^)]*\)/i, "");
+}
+
 // --- command guard ---
-// The `command` override runs as CL as the connected profile. A safety net, not the primary
-// control: the profile's authority is. One QCMDEXC command cannot chain another, so the leading
-// verb is the whole decision.
 const DESTRUCTIVE_PREFIXES = ["dlt", "clr", "rmv"];
 const DESTRUCTIVE_CL = new Set([
   "rgzpfm", "savlib", "savobj", "rstlib", "rstobj", "crtusrprf", "chgusrprf",
@@ -53,7 +53,7 @@ const DESTRUCTIVE_CL = new Set([
   "sbmjob", "call", "qsh", "strqsh", "strsql", "rundsql", "runsql", "runqry",
 ]);
 
-const verbOf = (command: string): string => (command.trim().split(/\s+/)[0] || "").split("/").pop()!.toLowerCase(); // qsys/dltf is dltf
+const verbOf = (command: string): string => (command.trim().split(/\s+/)[0] || "").split("/").pop()!.toLowerCase();
 
 export function assertCompileCommandAllowed(command: string, extraBlocked: string[] = []): void {
   const verb = verbOf(command);
@@ -67,11 +67,9 @@ export function assertCompileCommandAllowed(command: string, extraBlocked: strin
 }
 
 // --- evfevent ---
-const MSGID = /^[A-Z]{2,4}\d{3,4}$/; // RNF7030, CPD0043, SQL0312, MSG...
+const MSGID = /^[A-Z]{2,4}\d{3,4}$/;
 
-// Anchored on the msgId token rather than the column widths. The DDS record is:
-//   ERROR 0 001 1 <seqnbr> <startLine> <startCol> <endLine> <endCol> <msgId> <sevClass> <sev> <textLen> <text>
-// where the one letter severity class (E/W/I/S) is optional.
+// reads ERROR 0 001 1 <seqnbr> <startLine> <startCol> <endLine> <endCol> <msgId> [<sevClass>] <sev> <textLen> <text>
 export function parseEvfevent(lines: string[]): CompileError[] {
   const out: CompileError[] = [];
   for (const raw of lines) {
@@ -82,7 +80,7 @@ export function parseEvfevent(lines: string[]): CompileError[] {
     let j = i + 1;
     if (/^[A-Za-z]$/.test(t[j] ?? "")) j++;
     const severity = Number(t[j]);
-    const text = t.slice(j + 2).join(" ").trim(); // t[j+1] is the text length
+    const text = t.slice(j + 2).join(" ").trim();
     const startLine = Number(t[i - 4]);
     out.push({
       severity: Number.isFinite(severity) ? severity : 0,
