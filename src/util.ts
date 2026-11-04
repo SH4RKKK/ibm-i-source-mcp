@@ -26,8 +26,11 @@ const WRITES = /\b(?:insert\s+into|delete\s+from|merge\s+into|update\s+\S+\s+set
 // system functions that run CL, call out of the box, or read IFS files
 const REFUSED_FN = /\b(qcmdexc|http[a-z_]*|ifs_[a-z_]*)\s*\(/i;
 // system services that return the contents of data rather than its description
-const DATA = /\b(display_journal\w*|get_[a-z]*_from_file|spooled_file_data|data_queue_entries|receive_data_queue|data_area_info)\b/i;
+const DATA = /\b(display_journal\w*|get_[a-z]*_from_file|data_queue_entries|receive_data_queue|data_area_info)\b/i;
+// every spooled_file_data mention, with its argument list when it is a call
+const SPOOL_READ = /\bspooled_file_data\b\s*(\(([^)]*)\))?/gi;
 const RUNAWAY = /\bsyspartitionindex(?:stat|es)\b/i;
+const QUEUE_VIEW = /\boutput_queue_entries(?:_basic)?\b(?!\s*\()/i;
 export const SYSTEM_SCHEMAS = ["QSYS", "QSYS2", "SYSIBM", "SYSIBMADM", "SYSTOOLS"];
 
 export function assertSelectOnly(statement: string): string {
@@ -41,6 +44,11 @@ export function assertSelectOnly(statement: string): string {
   if (fn) throw new Error(`refusing to call ${fn[1].toLowerCase()}() from run_system_sql`);
   const data = DATA.exec(sql);
   if (data) throw new Error(`refusing ${data[1].toLowerCase()}, it returns the contents of data and run_system_sql only reads system information`);
+  for (const [, , args] of sql.matchAll(SPOOL_READ)) {
+    const name = args ? /\bspooled_file_name\s*=>\s*'([^']*)'/i.exec(args)?.[1] : undefined;
+    if (name?.trim().toUpperCase() !== "QPJOBLOG") throw new Error(`refusing spooled_file_data${name ? ` for ${name}` : ""}, run_system_sql reads only job logs from the spool, so pass spooled_file_name => 'QPJOBLOG'`);
+  }
+  if (QUEUE_VIEW.test(sql)) throw new Error("refusing the output_queue_entries view, it scans every output queue on the box and nothing stops it once it starts. Use the table function for one queue, table(qsys2.output_queue_entries('QUSRSYS', 'QEZJOBLOG', 'NO'))");
   const slow = RUNAWAY.exec(sql);
   if (slow) throw new Error(`refusing ${slow[0].toLowerCase()}, it can run for minutes and nothing stops it once it starts. Use qsys.qadbkfld for the key fields of a file, and systools.related_objects for the logical files over one`);
   return sql;

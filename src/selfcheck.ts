@@ -254,11 +254,29 @@ test("assertSelectOnly refuses the system services that return the contents of d
     "select * from table(qsys2.display_journal('MYLIB', 'MYJRN')) j",
     "select * from table(mylib.display_journal_mylib_myfile()) j",
     "select get_clob_from_file('/home/myuser/notes.txt') from sysibm.sysdummy1",
-    "select * from table(systools.spooled_file_data(job_name => 'X', spooled_file_name => 'Y')) s",
     "select * from table(qsys2.data_queue_entries('MYDTAQ', 'MYLIB')) d",
     "select * from table(qsys2.receive_data_queue('MYDTAQ', 'MYLIB')) d",
     "select data_area_value from qsys2.data_area_info where data_area_library = 'MYLIB'",
   ]) assert.throws(() => assertSelectOnly(bad), /contents of data/, `${JSON.stringify(bad)} must be refused`);
+});
+
+test("assertSelectOnly reads job logs from the spool and refuses every other spooled file", () => {
+  const joblog = "select ordinal_position, spooled_data from table(systools.spooled_file_data(job_name => '123456/MYUSER/MYPGM', spooled_file_name => 'QPJOBLOG', spooled_file_number => '1')) x where spooled_data like '%CPF%' order by ordinal_position";
+  assert.equal(assertSelectOnly(joblog), joblog);
+  assert.doesNotThrow(() => assertSelectOnly("select * from table(systools.spooled_file_data(job_name => '123456/MYUSER/MYPGM', spooled_file_name => 'qpjoblog')) x"));
+  for (const bad of [
+    "select * from table(systools.spooled_file_data(job_name => '123456/MYUSER/MYPGM', spooled_file_name => 'INVOICE')) x",
+    "select * from table(systools.spooled_file_data('123456/MYUSER/MYPGM', 'INVOICE')) x",
+    "select * from table(systools.spooled_file_data(job_name => trim('QPJOBLOG'), spooled_file_name => 'INVOICE')) x",
+    "select * from table(systools.\"SPOOLED_FILE_DATA\"(job_name => 'X', spooled_file_name => 'INVOICE')) x",
+    "select * from table(systools.spooled_file_data(job_name => 'X', spooled_file_name => 'QPJOBLOG')) a, table(systools.spooled_file_data(job_name => 'X', spooled_file_name => 'INVOICE')) b",
+  ]) assert.throws(() => assertSelectOnly(bad), /only job logs/, `${JSON.stringify(bad)} must be refused`);
+});
+
+test("assertSelectOnly refuses the output_queue_entries view but not its table function", () => {
+  for (const bad of ["select * from qsys2.output_queue_entries where job_name = 'X'", "select * from qsys2.output_queue_entries_basic"])
+    assert.throws(() => assertSelectOnly(bad), /scans every output queue/, `${JSON.stringify(bad)} must be refused`);
+  assert.doesNotThrow(() => assertSelectOnly("select * from table(qsys2.output_queue_entries('QUSRSYS', 'QEZJOBLOG', 'NO')) x where job_name = '123456/MYUSER/MYPGM'"));
 });
 
 test("assertSelectOnly refuses the two catalog views that run for minutes and cannot be stopped", () => {
