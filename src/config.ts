@@ -62,6 +62,5 @@ export function loadProfile(env: NodeJS.ProcessEnv = process.env): Profile {
     mapepireJar: env.IBMI_MAPEPIRE_JAR || undefined,
     readOnly: bool(env.IBMI_READ_ONLY, false),
     blockedCl: list(env.IBMI_BLOCKED_CL),
-    blockedTables: list(env.IBMI_BLOCKED_TABLES),
   };
 }

@@ -2,7 +2,7 @@ import mapepire from "@ibm/mapepire-js";
 import type { CompileError, CompileOpts, CompileResult, LibraryListAction, LibraryListChange, LibraryListEntry, MemberMeta, MemberRef, Profile, Reporter, SearchMatch, SearchOpts, SearchResult, SqlColumn } from "./types.js";
 import { NOOP_REPORTER } from "./types.js";
 import { assertCompileCommandAllowed, buildCompileCommand, buildLibraryListCommands, parseEvfevent } from "./compile.js";
-import { assertSelectOnly, likeLiteral, parseFndstrpdm, withTimeLimit } from "./util.js";
+import { assertSelectOnly, assertSystemOnly, likeLiteral, parseFndstrpdm, withTimeLimit } from "./util.js";
 import { closeSshMapepire, connectSshMapepire, raceJobClosed } from "./sshMapepire.js";
 
 const { SQLJob } = mapepire;
@@ -97,7 +97,6 @@ export class MapepireBackend {
   private async fetchRows(statement: string, max: number, parameters?: any[]): Promise<{ rows: Row[]; columns: SqlColumn[]; truncated: boolean }> {
     const job = await this.connect();
     const q = (job as any).query(statement, parameters ? { parameters } : undefined);
-    // one past the cap: is_done stays false when a result is exactly the cap, so it cannot tell truncation
     const rs: any = await raceJobClosed(job, q.execute(max + 1));
     await q.close?.();
     const columns = (rs.metadata?.columns ?? []).map((c: any) => ({ name: c.name, type: c.type, precision: c.precision, scale: c.scale }));
@@ -227,11 +226,13 @@ export class MapepireBackend {
 
   // --- sql ---
   async runSql(statement: string, maxRows?: number, reporter: Reporter = NOOP_REPORTER): Promise<{ rows: Row[]; columns: SqlColumn[]; truncated: boolean; cap: number }> {
-    const sql = assertSelectOnly(statement, this.profile.blockedTables);
+    const sql = assertSelectOnly(statement);
     const cap = Math.min(maxRows ?? 10, MAX_ROWS);
     await this.connect(reporter);
     reporter.step(`running sql, first ${cap} row(s)`);
-    // mapepire cannot cancel and cancel_sql is ignored, so the reset frees the session, not the box
+    const refs = await this.sql(`select name_type, schema, name, usage_type, sql_statement_type
+       from table(qsys2.parse_statement(?, '*SYS', '*PERIOD', '*APOSTSQL'))`, [sql]);
+    assertSystemOnly(refs.map((r) => ({ type: r.NAME_TYPE, schema: r.SCHEMA ?? null, name: r.NAME, usage: r.USAGE_TYPE, statement: r.SQL_STATEMENT_TYPE })));
     const { rows, columns, truncated } = await withTimeLimit(this.fetchRows(sql, cap), SQL_TIME_LIMIT_MS, () => void this.close(),
       `run_sql gave up after ${SQL_TIME_LIMIT_MS / 1000}s and reset the session, so the query may still be running on the box. Narrow the select. The next call reconnects, and any manage_library_list change is gone`);
     const names = columns.map((c) => c.name);

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assertSelectOnly, extFor, likeLiteral, parseFndstrpdm, sqlJson, textTable, typeFromPath, withTimeLimit } from "./util.js";
+import { assertSelectOnly, assertSystemOnly, extFor, likeLiteral, parseFndstrpdm, sqlJson, textTable, typeFromPath, withTimeLimit } from "./util.js";
 import { loadProfile } from "./config.js";
 import { MapepireBackend, aliasStmt, memberMetaStmt, qcmdexc, validLibOrStar, validName } from "./mapepire.js";
 import { ToolReporter } from "./report.js";
@@ -193,16 +193,16 @@ test("memberMetaStmt answers ccsid, length, type, change date and existence in o
 // --- run_sql guard ---
 test("assertSelectOnly allows the select shapes run_sql exists for", () => {
   for (const ok of [
-    "select * from MYLIB.MYFILE",
-    "select * from mylib/myfile",
+    "select * from QSYS2.SYSTABLES",
+    "select * from qsys/qadbkfld",
     "select objname from table(qsys2.object_statistics('MYLIB', '*FILE'))",
     "select sql_name from table(systools.related_objects(library_name => 'MYLIB', file_name => 'MYFILE'))",
     "with c as (select 1 as n from sysibm.sysdummy1) select * from c",
     "(select 1 from sysibm.sysdummy1) union (select 2 from sysibm.sysdummy1)",
     "SeLeCt 1 from sysibm.sysdummy1",
     "\n\n  select 1 from sysibm.sysdummy1",
-    "select * from MYLIB.MYFILE fetch first 5 rows only",
-    "select * from MYLIB.MYFILE with ur",
+    "select * from QSYS2.SYSTABLES fetch first 5 rows only",
+    "select * from QSYS2.SYSCOLUMNS with ur",
   ]) assert.equal(assertSelectOnly(ok), ok.trim(), `${JSON.stringify(ok)} must be allowed`);
   assert.equal(assertSelectOnly("select 1 from sysibm.sysdummy1;  "), "select 1 from sysibm.sysdummy1");
 });
@@ -241,7 +241,19 @@ test("assertSelectOnly refuses the functions that make a select run CL, phone ho
     "select systools.httpgetclob('http://example.com', '') from sysibm.sysdummy1",
     "select * from table(qsys2.ifs_read('/home/myuser/.ssh/id_rsa'))",
   ]) assert.throws(() => assertSelectOnly(bad), /refusing to call/, `${JSON.stringify(bad)} must be refused`);
-  assert.doesNotThrow(() => assertSelectOnly("select http_status from mylib.mylog"), "a name with no call paren is a column");
+  assert.doesNotThrow(() => assertSelectOnly("select http_status from sysibm.sysdummy1"), "a name with no call paren is a column");
+});
+
+test("assertSelectOnly refuses the system services that return the contents of data", () => {
+  for (const bad of [
+    "select * from table(qsys2.display_journal('MYLIB', 'MYJRN')) j",
+    "select * from table(mylib.display_journal_mylib_myfile()) j",
+    "select get_clob_from_file('/home/myuser/notes.txt') from sysibm.sysdummy1",
+    "select * from table(systools.spooled_file_data(job_name => 'X', spooled_file_name => 'Y')) s",
+    "select * from table(qsys2.data_queue_entries('MYDTAQ', 'MYLIB')) d",
+    "select * from table(qsys2.receive_data_queue('MYDTAQ', 'MYLIB')) d",
+    "select data_area_value from qsys2.data_area_info where data_area_library = 'MYLIB'",
+  ]) assert.throws(() => assertSelectOnly(bad), /contents of data/, `${JSON.stringify(bad)} must be refused`);
 });
 
 test("assertSelectOnly refuses the two catalog views that run for minutes and cannot be stopped", () => {
@@ -271,16 +283,27 @@ test("assertSelectOnly refuses comments and inner semicolons, even inside a stri
     assert.throws(() => assertSelectOnly(bad), /one statement/, `${JSON.stringify(bad)} must be refused`);
 });
 
-test("assertSelectOnly refuses a blocked table however it is qualified, and a listed schema too", () => {
-  for (const bad of [
-    "select * from mysecrets", "select * from MYLIB.MYSECRETS", "select * from mylib/mysecrets",
-    `select * from "MYSECRETS"`, "select * from mylib.myfile a join MySecrets b on a.k = b.k",
-  ]) assert.throws(() => assertSelectOnly(bad, ["mysecrets"]), /blocked by IBMI_BLOCKED_TABLES/, `${JSON.stringify(bad)} must be refused`);
-  for (const ok of ["select * from mysecrets2", "select * from xmysecrets"])
-    assert.doesNotThrow(() => assertSelectOnly(ok, ["mysecrets"]), `${ok} is a different name`);
-  assert.doesNotThrow(() => assertSelectOnly("select * from mysecrets"), "nothing is blocked by default");
-  assert.doesNotThrow(() => assertSelectOnly("select * from my#secrets", ["secrets"]), "# is part of an IBM i name, not an edge");
-  assert.throws(() => assertSelectOnly("select * from mypayroll.anyfile", ["mypayroll"]), /blocked by IBMI_BLOCKED_TABLES/);
+// the shape qsys2.parse_statement reports, one row per name it finds
+const ref = (type: string, schema: string | null, name: string, usage = "QUERY", statement = "QUERY") => ({ type, schema, name, usage, statement });
+
+test("assertSystemOnly allows the catalog, system services and the built in functions", () => {
+  assert.doesNotThrow(() => assertSystemOnly([
+    ref("TABLE", "QSYS2", "SYSTABLES"), ref("TABLE", "QSYS", "QADBKFLD"), ref("TABLE", "SYSIBM", "SYSDUMMY1"),
+    ref("FUNCTION", "QSYS2", "OBJECT_STATISTICS"), ref("FUNCTION", "SYSTOOLS", "RELATED_OBJECTS"),
+    ref("FUNCTION", null, "RTRIM"), ref("COLUMN", null, ""),
+  ]));
+});
+
+test("assertSystemOnly refuses a user table, an unqualified table and a user function", () => {
+  assert.throws(() => assertSystemOnly([ref("TABLE", "QSYS2", "SYSTABLES"), ref("TABLE", "MYLIB", "MYFILE")]), /never the rows of a user table/);
+  assert.throws(() => assertSystemOnly([ref("TABLE", null, "MYFILE")]), /qualify MYFILE/, "an unqualified name resolves through the library list");
+  assert.throws(() => assertSystemOnly([ref("FUNCTION", "MYLIB", "MYUDTF")]), /never the rows of a user table/);
+});
+
+test("assertSystemOnly refuses a write target, a statement that is not a query, and an empty report", () => {
+  assert.throws(() => assertSystemOnly([ref("TABLE", "QSYS2", "SYSTABLES", "TARGET TABLE")]), /target table/);
+  assert.throws(() => assertSystemOnly([ref("TABLE", "QSYS2", "SYSTABLES", "QUERY", "DELETE")]), /delete statement/);
+  assert.throws(() => assertSystemOnly([]), /could not tell/, "a syntax error comes back as no rows, which must refuse");
 });
 
 // --- sql results ---
@@ -351,14 +374,12 @@ test("loadProfile reads env and applies defaults", () => {
   assert.equal(p.sourceFileCcsid, 37);
   assert.equal(p.readOnly, false);
   assert.deepEqual(p.blockedCl, []);
-  assert.deepEqual(p.blockedTables, []);
 });
 
 test("loadProfile parses safety options", () => {
-  const p = loadProfile({ ...baseEnv, IBMI_READ_ONLY: "true", IBMI_BLOCKED_CL: "crtpf, dltf", IBMI_BLOCKED_TABLES: "MYSECRETS, mylib.mypasswords" });
+  const p = loadProfile({ ...baseEnv, IBMI_READ_ONLY: "true", IBMI_BLOCKED_CL: "crtpf, dltf" });
   assert.equal(p.readOnly, true);
   assert.deepEqual(p.blockedCl, ["crtpf", "dltf"]);
-  assert.deepEqual(p.blockedTables, ["mysecrets", "mylib.mypasswords"]);
 });
 
 test("IBMI_READ_ONLY fails closed, so a stray space cannot unlock the box", () => {

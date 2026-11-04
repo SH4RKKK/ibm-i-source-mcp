@@ -1,6 +1,6 @@
 import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { MemberRef, SqlColumn } from "./types.js";
+import type { MemberRef, SqlColumn, SqlRef } from "./types.js";
 
 // --- source types ---
 // the source type lowercased, like Code for IBM i, so editors pick the right handler
@@ -27,30 +27,43 @@ export function likeLiteral(term: string): string {
 
 // --- run_sql guard ---
 const SELECT_START = /^[(\s]*(?:select|with)\b/i;
-// select * from final table (insert ...) is a write
 const WRITES = /\b(?:insert\s+into|delete\s+from|merge\s+into|update\s+\S+\s+set|(?:final|new|old)\s+table\s*\()/i;
-// qsys2.qcmdexc is also a scalar function, so a select can run CL
-const WRITE_FN = /\b(qcmdexc|http[a-z_]*|ifs_[a-z_]*)\s*\(/i;
+// system functions that run CL, call out of the box, or read IFS files
+const REFUSED_FN = /\b(qcmdexc|http[a-z_]*|ifs_[a-z_]*)\s*\(/i;
+// system services that return the contents of data rather than its description
+const DATA = /\b(display_journal\w*|get_[a-z]*_from_file|spooled_file_data|data_queue_entries|receive_data_queue|data_area_info)\b/i;
 const RUNAWAY = /\bsyspartitionindex(?:stat|es)\b/i;
-const EDGE = "[^A-Z0-9#$@_]";
-const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+export const SYSTEM_SCHEMAS = ["QSYS", "QSYS2", "SYSIBM", "SYSIBMADM", "SYSTOOLS"];
 
-export function assertSelectOnly(statement: string, blockedTables: string[] = []): string {
+export function assertSelectOnly(statement: string): string {
   const sql = statement.trim().replace(/;\s*$/, "");
   if (!sql) throw new Error("empty sql statement");
-  // ponytail: comments are refused, not stripped, and literals are not parsed. A quote aware stripper is the upgrade.
   if (/--|\/\*/.test(sql)) throw new Error("remove the comments (-- and /* */), run_sql refuses a statement carrying any");
   if (sql.includes(";")) throw new Error(`run_sql takes one statement, remove the ";"`);
   if (!SELECT_START.test(sql)) throw new Error(`run_sql only runs select, "${sql.replace(/^[(\s]+/, "").split(/[\s(]+/)[0].toLowerCase()}" is not one`);
   if (WRITES.test(sql)) throw new Error("refusing a write inside a select");
-  const fn = WRITE_FN.exec(sql);
+  const fn = REFUSED_FN.exec(sql);
   if (fn) throw new Error(`refusing to call ${fn[1].toLowerCase()}() from run_sql`);
+  const data = DATA.exec(sql);
+  if (data) throw new Error(`refusing ${data[1].toLowerCase()}, it returns the contents of data and run_sql only reads system information`);
   const slow = RUNAWAY.exec(sql);
-  if (slow) throw new Error(`refusing ${slow[0].toLowerCase()}: it can run for minutes and nothing stops it once it starts. Use qsys.qadbkfld for the key fields of a file, and systools.related_objects for the logical files over one`);
-  const upper = sql.toUpperCase();
-  const hit = blockedTables.find((t) => new RegExp(`(^|${EDGE})${escapeRegex(t.toUpperCase())}($|${EDGE})`).test(upper));
-  if (hit) throw new Error(`${hit.toUpperCase()} is blocked by IBMI_BLOCKED_TABLES`);
+  if (slow) throw new Error(`refusing ${slow[0].toLowerCase()}, it can run for minutes and nothing stops it once it starts. Use qsys.qadbkfld for the key fields of a file, and systools.related_objects for the logical files over one`);
   return sql;
+}
+
+// checks the object references qsys2.parse_statement reports for a statement
+export function assertSystemOnly(refs: SqlRef[]): void {
+  if (!refs.length) throw new Error("could not tell what this select reads, so run_sql refuses it");
+  const schemas = SYSTEM_SCHEMAS.join(", ");
+  for (const r of refs) {
+    if (r.statement !== "QUERY") throw new Error(`refusing a ${r.statement.toLowerCase()} statement, run_sql only reads`);
+    if (r.type === "COLUMN") continue;
+    if (r.usage !== "QUERY") throw new Error(`refusing ${r.name}, it is used as a ${r.usage.toLowerCase()} and run_sql only reads`);
+    // unqualified functions are the built ins, such as rtrim and count
+    if (r.type === "FUNCTION" && !r.schema) continue;
+    if (!r.schema) throw new Error(`qualify ${r.name} with its schema, run_sql only reads system information in ${schemas}`);
+    if (!SYSTEM_SCHEMAS.includes(r.schema)) throw new Error(`refusing ${r.schema}.${r.name}, run_sql only reads system information in ${schemas}, never the rows of a user table`);
+  }
 }
 
 export function withTimeLimit<T>(work: Promise<T>, ms: number, onTimeout: () => void, message: string): Promise<T> {
@@ -120,7 +133,6 @@ export function writeSqlFile(baseDir: string, json: string): string {
 }
 
 // --- sql results ---
-// ponytail: a cut cell loses its tail, json: true is the escape hatch
 const CELL_MAX = 60;
 const NUMERIC = /INT|DEC|NUM|DOUBLE|REAL|FLOAT/i;
 
@@ -134,7 +146,6 @@ export function textTable(columns: SqlColumn[], rows: Record<string, unknown>[])
   const head = [columns.map((c) => c.name), columns.map((c) => `${c.type}(${c.precision}${c.scale ? `,${c.scale}` : ""})`)];
   const body = rows.map((r) => columns.map((c) => cell(r[c.name])));
   const num = columns.map((c) => NUMERIC.test(c.type));
-  // reduce, not Math.max(...spread), which overflows on a big maxRows
   const width = columns.map((_, i) => [...head, ...body].reduce((w, r) => Math.max(w, r[i].length), 0));
   const line = (vals: string[]) => vals.map((v, i) => (num[i] ? v.padStart(width[i]) : v.padEnd(width[i]))).join("  ").trimEnd();
   return [...head.map(line), width.map((w) => "-".repeat(w)).join("  "), ...body.map(line)].join("\n");
