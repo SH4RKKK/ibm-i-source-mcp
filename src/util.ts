@@ -3,15 +3,11 @@ import { dirname, join } from "node:path";
 import type { MemberRef, SqlColumn, SqlRef } from "./types.js";
 
 // --- source types ---
-// the source type lowercased, like Code for IBM i, so editors pick the right handler
 export function extFor(type: string): string {
   const t = type?.toLowerCase().trim();
   return t ? `.${t}` : ".txt";
 }
 
-// inverse of extFor. These never reach addpfm as a srctype: TXT is what extFor emits for a member
-// with no type, and the rest are editor leftovers, so MYPGM.rpgle.bak would otherwise create a
-// member of srctype BAK. Returning undefined forces the caller to pass memberType.
 const NOT_A_SOURCE_TYPE = /^(TXT|BAK|ORIG|TMP|TEMP|SAVE|SAVED|SWP|OLD|NEW|COPY)$/;
 export function typeFromPath(path: string): string | undefined {
   const ext = /\.([A-Za-z0-9]+)$/.exec(path)?.[1]?.toUpperCase();
@@ -19,8 +15,7 @@ export function typeFromPath(path: string): string | undefined {
 }
 
 // --- sql escaping ---
-// for a `like '%...%' escape '\'` we build. Upper cased because the column is compared upper
-// cased, and % and _ are escaped so a filter is a substring rather than a pattern.
+// a term as an upper cased literal for like '%...%' escape '\', with %, _ and \ escaped
 export function likeLiteral(term: string): string {
   return term.replace(/'/g, "''").replace(/[\\%_]/g, "\\$&").toUpperCase();
 }
@@ -75,9 +70,7 @@ export function withTimeLimit<T>(work: Promise<T>, ms: number, onTimeout: () => 
 }
 
 // --- fndstrpdm listing ---
-// Read structurally, never by the English headings, which are translated on another box. srcseq is
-// packed(6,2) and prints without its point, so 400 is line 4.00.
-// ponytail: a record wider than the print area folds and the tail is dropped, not rejoined.
+// the hits in a fndstrpdm spool listing, as member, sequence number and line
 export function parseFndstrpdm(lines: string[], known: Set<string>, needle: string): { member: string; seqNbr: number; line: string }[] {
   const out: { member: string; seqNbr: number; line: string }[] = [];
   const mark = needle.trim().toUpperCase();
@@ -95,10 +88,10 @@ export function parseFndstrpdm(lines: string[], known: Set<string>, needle: stri
       if (ruler) { from = ruler.index; to = ruler.index + ruler[0].length; fresh = true; }
       continue;
     }
-    // a heading, so the block is changing. Forgetting the member here is what stops hits from a
-    // member outside `known` being reported under the last one that was in it.
+    // a heading after a ruler starts a new block with no member yet
     if (fresh) { member = ""; named = false; fresh = false; }
-    if (named) continue; // only the first known name in a block is the member, not a later Type
+    // only the first known name in a block is the member
+    if (named) continue;
     const value = raw.split(":")[1]?.trim().split(/\s+/)[0]?.toUpperCase();
     if (value && known.has(value)) { member = value; named = true; }
   }
@@ -106,8 +99,7 @@ export function parseFndstrpdm(lines: string[], known: Set<string>, needle: stri
 }
 
 // --- local files ---
-// UTF-8 (no BOM) with CRLF. The backup refreshes on each read and edits never touch it, so it
-// stays a restore point.
+// writes UTF-8 without a BOM, with CRLF line ends, to the tree and to a copy under .backup
 export function writeLocalCopy(baseDir: string, ref: MemberRef, type: string, content: string): { path: string; backup: string } {
   const name = ref.member + extFor(type);
   const crlf = content.replace(/\r?\n/g, "\r\n");

@@ -8,12 +8,11 @@ import { closeSshMapepire, connectSshMapepire, raceJobClosed } from "./sshMapepi
 const { SQLJob } = mapepire;
 
 // --- constants ---
-const NAME = /^[A-Za-z#$@][A-Za-z0-9#$@_.]{0,9}$/; // trust boundary: spliced into SQL and CL, never bound
+const NAME = /^[A-Za-z#$@][A-Za-z0-9#$@_.]{0,9}$/;
 const MAX_ROWS = 100_000;
-const SRCSEQ_WHOLE_MAX = 9999;   // srcseq is packed(6,2), so 9999.99 is the ceiling
+const SRCSEQ_WHOLE_MAX = 9999;
 const SQL_TIME_LIMIT_MS = 10_000;
 
-// shared by every call, which is what serialize() protects. qtemp is private to the job.
 const READ_ALIAS = "MCPREAD", WRITE_ALIAS = "MCPWRITE", EVENT_ALIAS = "MCPEVENT";
 
 // --- types ---
@@ -26,13 +25,12 @@ export function validName(v: string, what: string): string {
   return v.toUpperCase();
 }
 export function validLibOrStar(v: string, what: string): string {
-  if (/^\*[a-z]+$/i.test(v)) return v.toUpperCase(); // *curlib, *libl
+  if (/^\*[a-z]+$/i.test(v)) return v.toUpperCase();
   return validName(v, what);
 }
 const refNames = (r: MemberRef) => ({ lib: validName(r.library, "library"), srcf: validName(r.sourceFile, "sourceFile"), mbr: validName(r.member, "member") });
 
 // --- sql templates ---
-// an alias is the only way to address one member from SQL
 export function aliasStmt(alias: string, lib: string, srcf: string, mbr: string, then?: string): string {
   return `begin
     begin declare continue handler for sqlexception begin end;
@@ -42,7 +40,6 @@ export function aliasStmt(alias: string, lib: string, srcf: string, mbr: string,
   end`;
 }
 
-// left join: a missing member still returns the file's row, which is the exists check
 export function memberMetaStmt(lib: string, srcf: string, mbr: string): string {
   return `select c.ccsid, c.length, rtrim(cast(p.source_type as varchar(10))) as source_type,
             varchar_format(p.last_source_update_timestamp,'YYYY-MM-DD HH24:MI:SS') as changed,
@@ -53,7 +50,6 @@ export function memberMetaStmt(lib: string, srcf: string, mbr: string): string {
     where c.table_schema='${lib}' and c.table_name='${srcf}' and c.column_name='SRCDTA'`;
 }
 
-// a real `cl` request costs the mapepire server three statements and blocks the connection
 export const qcmdexc = (command: string) => `call qsys2.qcmdexc('${command.replace(/'/g, "''")}')`;
 
 // --- backend ---
@@ -61,7 +57,6 @@ export class MapepireBackend {
   private job?: InstanceType<typeof SQLJob>;
   private connecting?: Promise<InstanceType<typeof SQLJob>>;
   private chain: Promise<unknown> = Promise.resolve();
-  // minted once and kept across a reconnect, so a dropped job's held spool stays reachable
   private readonly splfTag = ("MCP" + Math.random().toString(36).slice(2).toUpperCase() + "0000000").slice(0, 10);
   private spoolReady = false;
 
@@ -80,7 +75,7 @@ export class MapepireBackend {
       if (this.job) {
         reporter.log("notice", `connection to ${this.profile.host} was lost, reconnecting`);
         this.job = undefined;
-        this.spoolReady = false; // ovrprtf was job scoped, the new job needs it again
+        this.spoolReady = false;
       }
       this.connecting = connectSshMapepire(this.profile, reporter).finally(() => (this.connecting = undefined));
     }
@@ -123,7 +118,6 @@ export class MapepireBackend {
     return this.serialize(async () => {
       reporter.step(`reading ${lib}/${srcf}(${mbr})`);
       const [meta] = await Promise.all([this.memberMeta(lib, srcf, mbr, true), this.sql(aliasStmt(READ_ALIAS, lib, srcf, mbr))]);
-      // ccsid 65535 means no conversion, so cast to sourceFileCcsid (default 37)
       const srcdta = meta.ccsid === 65535 ? `cast(srcdta as varchar(${meta.length}) ccsid ${this.profile.sourceFileCcsid}) as srcdta` : "srcdta";
       const rows = await this.sql(`select ${srcdta} from qtemp.${READ_ALIAS}`);
       reporter.step(`downloaded ${rows.length} lines from ${lib}/${srcf}(${mbr})`);
@@ -134,7 +128,6 @@ export class MapepireBackend {
     });
   }
 
-  // soft: read path only. On upload a thrown query reads as exists:false, and create:true addpfms over a live member.
   private async memberMeta(lib: string, srcf: string, mbr: string, soft = false): Promise<MemberMetaRow> {
     let r: Row | undefined;
     try { r = (await this.sql(memberMetaStmt(lib, srcf, mbr)))[0]; } catch (e) { if (!soft) throw e; }
@@ -143,8 +136,6 @@ export class MapepireBackend {
   }
 
   // --- catalog and library list ---
-  // file_type='S' keeps data files out, not "source_type is not null": a real source member can
-  // have a blank type, and filtering on that hid it entirely.
   private async enumerateMembers(lib: string, srcf?: string, type?: string, filter?: string): Promise<Row[]> {
     const like = filter ? likeLiteral(filter) : undefined;
     return this.sql(`select rtrim(system_table_name) as source_file, rtrim(system_table_member) as name,
@@ -161,7 +152,7 @@ export class MapepireBackend {
   }
 
   async listLibraries(filter?: string, includeSystem = false, reporter: Reporter = NOOP_REPORTER): Promise<{ name: string; text: string }[]> {
-    const scope = includeSystem ? "*ALL" : "*ALLUSR"; // *ALLUSR is user libraries, where source lives
+    const scope = includeSystem ? "*ALL" : "*ALLUSR";
     const f = filter?.trim();
     const like = f ? likeLiteral(f) : undefined;
     const where = like ? `where upper(objname) like '%${like}%' escape '\\' or upper(objtext) like '%${like}%' escape '\\'` : "";
@@ -243,7 +234,6 @@ export class MapepireBackend {
   }
 
   // --- search ---
-  // one fndstrpdm per source file instead of an alias and a scan per member, 20ms down to 1.7ms
   async searchSource(opts: SearchOpts, reporter: Reporter = NOOP_REPORTER): Promise<SearchResult> {
     const lib = validName(opts.library, "library");
     const srcf = opts.sourceFile ? validName(opts.sourceFile, "sourceFile") : undefined;
@@ -256,7 +246,6 @@ export class MapepireBackend {
     return this.serialize(async () => {
       reporter.step(`listing members in ${lib}${srcf ? `/${srcf}` : ""}`);
       const members = await this.enumerateMembers(lib, srcf, type);
-      // fndstrpdm has no type filter, so the catalog list is what applies memberType
       const files = new Map<string, Map<string, string>>();
       for (const m of members) {
         const f = String(m.SOURCE_FILE);
@@ -268,23 +257,20 @@ export class MapepireBackend {
       await this.holdSpool();
       await this.dropTaggedSpool();
 
-      // fndstrpdm always ignores case, so cs filters the superset below and drops the cap with it
+      // hits printed per member, every hit for a case sensitive search, which is filtered afterwards
       const cap = cs ? "*all" : String(max + 1);
       const order = [...files.keys()];
-      // every scan first, then one spool read: the round trips cost more than the scan does
       const scanned: string[] = [];
       for (const [i, f] of order.entries()) {
         reporter.bar(`searching ${lib}/${f}`, i, order.length);
         const r = await this.clResult(
           `fndstrpdm string('${raw.replace(/'/g, "''")}') file(${lib}/${f}) mbr(*all) option(*none) prtrcds(${cap})`);
         if (r?.success === false) reporter.log("warning", `skipped ${lib}/${f}: ${r.error || r.sql_state || "fndstrpdm failed"}`);
-        else scanned.push(f); // a failed scan prints nothing, so it must not shift the pairing
+        else scanned.push(f);
       }
       reporter.bar(`reading ${scanned.length} listing(s)`, order.length, order.length);
       let listings: string[][];
       try { listings = await this.readTaggedSpool(); } finally { await this.dropTaggedSpool(); }
-      // listings pair to scans by print order, so a count mismatch would parse every later file
-      // against the wrong member set. Wrong hits are worse than none.
       if (listings.length !== scanned.length) throw new Error(
         `search printed ${listings.length} listing(s) for ${scanned.length} source file(s), so hits cannot be tied to members. Narrow it with sourceFile.`);
 
@@ -317,7 +303,7 @@ export class MapepireBackend {
     await this.connect(reporter);
     return this.serialize(async () => {
       reporter.step(`checking ${lib}/${srcf}(${mbr})`);
-      const meta = await this.memberMeta(lib, srcf, mbr); // nothing is touched until this passes
+      const meta = await this.memberMeta(lib, srcf, mbr);
       let created = false;
       if (!meta.exists) {
         if (!opts.create) throw new Error(
@@ -340,7 +326,7 @@ export class MapepireBackend {
       }
       const len = meta.length;
       const raw = content.replace(/\r\n/g, "\n").split("\n");
-      if (raw.length && raw[raw.length - 1] === "") raw.pop(); // trailing newline
+      if (raw.length && raw[raw.length - 1] === "") raw.pop();
       const warnings: string[] = [];
       const lines = raw.map((l, i) => {
         if (l.length > len) { warnings.push(`line ${i + 1} truncated to ${len} chars`); return l.slice(0, len); }
@@ -356,10 +342,9 @@ export class MapepireBackend {
       );
 
       reporter.log("info", `${created ? "filling the new" : "replacing the content of"} ${lib}/${srcf}(${mbr}) with ${lines.length} lines`);
-      // one statement with every row bound, so one round trip: 30000 lines (2.3MB) in 1.4s
       reporter.step(`uploading ${lines.length} lines to ${mbr}`);
       try {
-        // srcseq is packed(6,2), so past 9999 lines the whole numbers run out and it steps by .01
+        // sequence numbers step by .01 once a member passes 9999 lines
         await this.sql(`insert into qtemp.${WRITE_ALIAS} (srcseq, srcdat, srcdta) values (?, ?, ?)`,
           lines.map((l, i) => [scale ? (i + 1) / 100 : i + 1, 0, l]));
       } catch (e: any) {
@@ -372,7 +357,6 @@ export class MapepireBackend {
   }
 
   // --- spool ---
-  // job scoped and touches nothing of the user's, so search still runs under IBMI_READ_ONLY
   private async holdSpool(): Promise<void> {
     if (this.spoolReady) return;
     await this.sql(qcmdexc(`ovrprtf file(*prtf) spool(*yes) hold(*yes) usrdta('${this.splfTag}') splfown(*curusrprf) ovrscope(*job)`));
@@ -394,8 +378,6 @@ export class MapepireBackend {
     return out;
   }
 
-  // the exception to assertCompileCommandAllowed refusing dlt*: never from input, and
-  // select(*current *all *all <tag>) reaches only this user's spool carrying our random tag.
   private async dropTaggedSpool(): Promise<void> {
     await this.sql(qcmdexc(`dltsplf file(*select) select(*current *all *all ${this.splfTag})`)).catch(() => {});
   }
@@ -424,7 +406,7 @@ export class MapepireBackend {
 
     return this.serialize(async () => {
       await this.holdSpool();
-      await this.dropTaggedSpool(); // a search that failed mid read leaves its listing behind
+      await this.dropTaggedSpool();
       reporter.log("info", `compile command: ${command}`);
       reporter.step(`compiling ${mbr} (${command.trim().split(/\s+/)[0]}) on ${this.profile.host}`);
       const result = await this.clResult(command);
@@ -439,7 +421,7 @@ export class MapepireBackend {
       }
 
       let errors: CompileError[] = [];
-      if (tgtlib !== "*CURLIB") { // EVFEVENT needs a concrete library to locate
+      if (tgtlib !== "*CURLIB") {
         reporter.step(`reading structured errors from ${tgtlib}/EVFEVENT(${name})`);
         errors = await this.readEvents(tgtlib, name).catch(() => []);
       } else listing += "\n\n(pass an explicit targetLibrary for structured EVFEVENT errors)";
