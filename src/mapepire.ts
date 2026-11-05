@@ -349,10 +349,9 @@ export class MapepireBackend {
 
       reporter.log("info", `${created ? "filling the new" : "replacing the content of"} ${lib}/${srcf}(${mbr}) with ${lines.length} lines`);
       reporter.step(`uploading ${lines.length} lines to ${mbr}`);
-      const srcdta = meta.ccsid === 65535 ? `cast(? as varchar(${len}) ccsid ${this.profile.sourceFileCcsid})` : "?";
       try {
         // sequence numbers step by .01 once a member passes 9999 lines
-        await this.sql(`insert into qtemp.${WRITE_ALIAS} (srcseq, srcdat, srcdta) values (?, ?, ${srcdta})`,
+        await this.sql(`insert into qtemp.${WRITE_ALIAS} (srcseq, srcdat, srcdta) values (?, ?, ?)`,
           lines.map((l, i) => [scale ? (i + 1) / 100 : i + 1, 0, l]));
       } catch (e: any) {
         const state = created ? `${lib}/${srcf}(${mbr}) was created and is empty` : `${lib}/${srcf}(${mbr}) was cleared and may be incomplete`;
