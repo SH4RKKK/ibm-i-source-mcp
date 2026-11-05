@@ -29,15 +29,15 @@ export function lineDates(oldLines: string[], oldDates: number[], newLines: stri
   return dates;
 }
 
-const MAX_EDITS = 3000;
+const MAX_CHANGED_LINES = 5000;
 
-// the pairs of old and new line indexes a shortest edit leaves alone (Myers), undefined past MAX_EDITS edits
+// the pairs of old and new line indexes a shortest edit leaves alone (Myers), undefined past MAX_CHANGED_LINES changed lines
 function keptLines(a: string[], b: string[]): [number, number][] | undefined {
   const n = a.length, m = b.length, off = n + m + 1;
   if (!n || !m) return [];
   const v = new Int32Array(2 * off + 1);
   const trace: Int32Array[] = [];
-  for (let d = 0; d <= Math.min(n + m, MAX_EDITS); d++) {
+  for (let d = 0; d <= Math.min(n + m, 2 * MAX_CHANGED_LINES); d++) {
     trace.push(v.slice(off - d - 1, off + d + 2));
     for (let k = -d; k <= d; k += 2) {
       let x = k === -d || (k !== d && v[off + k - 1] < v[off + k + 1]) ? v[off + k + 1] : v[off + k - 1] + 1;
