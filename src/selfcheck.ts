@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assertSelectOnly, assertSystemOnly, extFor, likeLiteral, parseFndstrpdm, readsSpool, sqlJson, textTable, typeFromPath, withTimeLimit } from "./util.js";
+import { assertSelectOnly, assertSystemOnly, extFor, likeLiteral, lineDates, parseFndstrpdm, readsSpool, sqlJson, textTable, typeFromPath, withTimeLimit, yymmdd } from "./util.js";
 import { loadProfile } from "./config.js";
 import { MapepireBackend, aliasStmt, memberMetaStmt, qcmdexc, spoolListStmt, validLibOrStar, validName } from "./mapepire.js";
 import { ToolReporter } from "./report.js";
@@ -27,6 +27,21 @@ test("extFor uses the member type as the extension", () => {
   assert.equal(extFor("DSPF"), ".dspf", "display file, not .dds");
   assert.equal(extFor("clle"), ".clle");
   assert.equal(extFor(""), ".txt");
+});
+
+test("lineDates keeps the date of every unchanged line and dates new and changed lines today", () => {
+  const old = ["a", "b", "c", "d", "e"], dates = [1, 2, 3, 4, 5];
+  assert.deepEqual(lineDates(old, dates, ["a", "b", "x", "y", "c", "d", "e"], 9), [1, 2, 9, 9, 3, 4, 5], "two inserted lines");
+  assert.deepEqual(lineDates(old, dates, ["a", "B", "c", "e"], 9), [1, 9, 3, 5], "a changed line and a deleted one");
+  assert.deepEqual(lineDates(old, dates, ["x", "a", "c", "e", "y"], 9), [9, 1, 3, 5, 9], "edits at both ends");
+  assert.deepEqual(lineDates(["a   "], [7], ["a"], 9), [7], "trailing blanks are no change");
+  assert.deepEqual(lineDates([], [], ["a", "b"], 9), [9, 9], "a new member");
+  const big = Array.from({ length: 20000 }, (_, i) => `line ${i}`);
+  const edited = [...big.slice(0, 100), "inserted", ...big.slice(100, 19000), "changed", ...big.slice(19001)];
+  const got = lineDates(big, big.map((_, i) => i + 1), edited, 0);
+  assert.equal(got.filter((d) => d === 0).length, 2, "only the inserted and the changed line are new");
+  assert.equal(got[19002], 19002, "a line after the edits keeps its own date");
+  assert.equal(yymmdd(new Date(2026, 10, 5)), 261105);
 });
 
 test("parseFndstrpdm reads the listing structurally, not by its English headings", () => {

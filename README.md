@@ -154,7 +154,7 @@ All `.env` and `.env.*` files are git-ignored, only `.env.example` is committed.
 
 ### Change
 
-- **`upload_source_member`**: writes an edited file back into a member, defaulting to the copy `read_source_member` saved. Lines longer than the record length are truncated and reported. `create: true` runs `addpfm` first for a member that does not exist yet. Creating is opt in, so a mistyped name fails and changes nothing rather than leaving a stray member behind in a customer library.
+- **`upload_source_member`**: writes an edited file back into a member, defaulting to the copy `read_source_member` saved. Lines longer than the record length are truncated and reported. Unchanged lines keep their source date, and new or changed lines get today's date, as SEU does. `create: true` runs `addpfm` first for a member that does not exist yet. Creating is opt in, so a mistyped name fails and changes nothing rather than leaving a stray member behind in a customer library.
 - **`compile_member`**: compiles a member and returns whether it succeeded, the spool listing, and the structured errors from the EVFEVENT file. It picks the `crt` command from the source type, and `command` overrides it. Pass a real `targetLibrary` to get the structured errors and to control where the object lands, since `*curlib` falls back to QGPL on a box with no current library.
 
 ## Progress and logging

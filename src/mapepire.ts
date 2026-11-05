@@ -2,7 +2,7 @@ import mapepire from "@ibm/mapepire-js";
 import type { CompileError, CompileOpts, CompileResult, LibraryListAction, LibraryListChange, LibraryListEntry, MemberMeta, MemberRef, Profile, Reporter, SearchMatch, SearchOpts, SearchResult, SqlColumn } from "./types.js";
 import { NOOP_REPORTER } from "./types.js";
 import { assertCompileCommandAllowed, buildCompileCommand, buildLibraryListCommands, parseEvfevent, withoutRejectedTgtccsid } from "./compile.js";
-import { assertSelectOnly, assertSystemOnly, likeLiteral, parseFndstrpdm, withTimeLimit } from "./util.js";
+import { assertSelectOnly, assertSystemOnly, likeLiteral, lineDates, parseFndstrpdm, withTimeLimit, yymmdd } from "./util.js";
 import { connectSshMapepire } from "./sshMapepire.js";
 
 const { SQLJob } = mapepire;
@@ -124,14 +124,19 @@ export class MapepireBackend {
     return this.serialize(async () => {
       reporter.step(`reading ${lib}/${srcf}(${mbr})`);
       const [meta] = await Promise.all([this.memberMeta(lib, srcf, mbr, true), this.sql(aliasStmt(READ_ALIAS, lib, srcf, mbr))]);
-      const srcdta = meta.ccsid === 65535 ? `cast(srcdta as varchar(${meta.length}) ccsid ${this.profile.sourceFileCcsid}) as srcdta` : "srcdta";
-      const rows = await this.sql(`select ${srcdta} from qtemp.${READ_ALIAS}`);
+      const rows = await this.readLines(meta);
       reporter.step(`downloaded ${rows.length} lines from ${lib}/${srcf}(${mbr})`);
       return {
         content: rows.map((r) => r.SRCDTA ?? "").join("\n"),
         meta: { type: meta.type, ccsid: meta.ccsid, lineCount: rows.length, lastChanged: meta.changed },
       };
     });
+  }
+
+  // the lines and dates of the member the read alias points at
+  private readLines(meta: MemberMetaRow): Promise<Row[]> {
+    const srcdta = meta.ccsid === 65535 ? `cast(srcdta as varchar(${meta.length}) ccsid ${this.profile.sourceFileCcsid}) as srcdta` : "srcdta";
+    return this.sql(`select srcdat, ${srcdta} from qtemp.${READ_ALIAS}`);
   }
 
   private async memberMeta(lib: string, srcf: string, mbr: string, soft = false): Promise<MemberMetaRow> {
@@ -340,6 +345,12 @@ export class MapepireBackend {
       });
       if (warnings.length) reporter.log("warning", `${warnings.length} line(s) are longer than the ${len}-char record length and will be truncated`);
       const scale = lines.length > SRCSEQ_WHOLE_MAX;
+      if (!created) {
+        reporter.step(`reading the line dates of ${mbr}`);
+        await this.sql(aliasStmt(READ_ALIAS, lib, srcf, mbr));
+      }
+      const old = created ? [] : await this.readLines(meta);
+      const dates = lineDates(old.map((r) => String(r.SRCDTA ?? "")), old.map((r) => Number(r.SRCDAT) || 0), lines, yymmdd(new Date()));
 
       reporter.step(created ? `preparing the new member ${mbr}` : `clearing ${mbr} (clrpfm) before the upload`);
       await this.runOrThrow(
@@ -352,7 +363,7 @@ export class MapepireBackend {
       try {
         // sequence numbers step by .01 once a member passes 9999 lines
         await this.sql(`insert into qtemp.${WRITE_ALIAS} (srcseq, srcdat, srcdta) values (?, ?, ?)`,
-          lines.map((l, i) => [scale ? (i + 1) / 100 : i + 1, 0, l]));
+          lines.map((l, i) => [scale ? (i + 1) / 100 : i + 1, dates[i], l]));
       } catch (e: any) {
         const state = created ? `${lib}/${srcf}(${mbr}) was created and is empty` : `${lib}/${srcf}(${mbr}) was cleared and may be incomplete`;
         throw new Error(`upload of ${lines.length} lines failed, ${state}, upload again once the problem is fixed: ${e.message}`);

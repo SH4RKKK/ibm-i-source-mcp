@@ -14,6 +14,52 @@ export function typeFromPath(path: string): string | undefined {
   return !ext || NOT_A_SOURCE_TYPE.test(ext) ? undefined : ext;
 }
 
+// --- source dates ---
+export const yymmdd = (d: Date) => (d.getFullYear() % 100) * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+
+// the srcdat of each new line, the old date where the line is unchanged and today where it is new or changed
+export function lineDates(oldLines: string[], oldDates: number[], newLines: string[], today: number): number[] {
+  const a = oldLines.map((l) => l.trimEnd()), b = newLines.map((l) => l.trimEnd());
+  const dates = b.map(() => today);
+  let p = 0;
+  for (; p < a.length && p < b.length && a[p] === b[p]; p++) dates[p] = oldDates[p];
+  let s = 0;
+  for (; s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]; s++) dates[b.length - 1 - s] = oldDates[a.length - 1 - s];
+  for (const [i, j] of keptLines(a.slice(p, a.length - s), b.slice(p, b.length - s)) ?? []) dates[p + j] = oldDates[p + i];
+  return dates;
+}
+
+const MAX_EDITS = 3000;
+
+// the pairs of old and new line indexes a shortest edit leaves alone (Myers), undefined past MAX_EDITS edits
+function keptLines(a: string[], b: string[]): [number, number][] | undefined {
+  const n = a.length, m = b.length, off = n + m + 1;
+  if (!n || !m) return [];
+  const v = new Int32Array(2 * off + 1);
+  const trace: Int32Array[] = [];
+  for (let d = 0; d <= Math.min(n + m, MAX_EDITS); d++) {
+    trace.push(v.slice(off - d - 1, off + d + 2));
+    for (let k = -d; k <= d; k += 2) {
+      let x = k === -d || (k !== d && v[off + k - 1] < v[off + k + 1]) ? v[off + k + 1] : v[off + k - 1] + 1;
+      let y = x - k;
+      while (x < n && y < m && a[x] === b[y]) { x++; y++; }
+      v[off + k] = x;
+      if (x < n || y < m) continue;
+      const kept: [number, number][] = [];
+      for (let e = d; e >= 0; e--) {
+        const at = (kk: number) => trace[e][kk + e + 1];
+        const kk = x - y;
+        const prevK = kk === -e || (kk !== e && at(kk - 1) < at(kk + 1)) ? kk + 1 : kk - 1;
+        const prevX = at(prevK), prevY = prevX - prevK;
+        while (x > prevX && y > prevY) kept.push([--x, --y]);
+        x = prevX; y = prevY;
+      }
+      return kept;
+    }
+  }
+  return undefined;
+}
+
 // --- sql escaping ---
 // a term as an upper cased literal for like '%...%' escape '\', with %, _ and \ escaped
 export function likeLiteral(term: string): string {
