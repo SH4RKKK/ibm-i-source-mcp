@@ -8,6 +8,7 @@ export interface Profile {
   mapepireJar?: string;          // override jar path on the box (else the uploaded copy)
   readOnly: boolean;             // when true, upload and compile are refused (default false)
   blockedCl: string[];           // extra destructive CL verbs to block on compile, on top of the defaults
+  allowedTables: string[];       // lib.table names run_system_sql may read besides the system schemas, lower cased
 }
 
 // --- reporting ---

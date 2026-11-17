@@ -234,7 +234,7 @@ export class MapepireBackend {
     reporter.step(`running sql, first ${cap} row(s)`);
     const refs = await this.sql(`select name_type, schema, name, usage_type, sql_statement_type
        from table(qsys2.parse_statement(?, '*SYS', '*PERIOD', '*APOSTSQL'))`, [sql]);
-    assertSystemOnly(refs.map((r) => ({ type: r.NAME_TYPE, schema: r.SCHEMA ?? null, name: r.NAME, usage: r.USAGE_TYPE, statement: r.SQL_STATEMENT_TYPE })));
+    assertSystemOnly(refs.map((r) => ({ type: r.NAME_TYPE, schema: r.SCHEMA ?? null, name: r.NAME, usage: r.USAGE_TYPE, statement: r.SQL_STATEMENT_TYPE })), this.profile.allowedTables);
     const { rows, columns, truncated } = await withTimeLimit(this.fetchRows(sql, cap), SQL_TIME_LIMIT_MS, () => void this.close(),
       `run_system_sql gave up after ${SQL_TIME_LIMIT_MS / 1000}s and reset the session, so the query may still be running on the box. Narrow the select. The next call reconnects, and any manage_library_list change is gone`);
     const names = columns.map((c) => c.name);

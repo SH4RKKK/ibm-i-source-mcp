@@ -336,6 +336,15 @@ test("assertSystemOnly refuses a user table, an unqualified table and a user fun
   assert.throws(() => assertSystemOnly([ref("FUNCTION", "MYLIB", "MYUDTF")]), /never the rows of a user table/);
 });
 
+test("assertSystemOnly reads a table IBMI_ALLOWED_TABLES names, and still refuses every other user table", () => {
+  const allowed = ["mylib.myfile"];
+  assert.doesNotThrow(() => assertSystemOnly([ref("TABLE", "QSYS2", "SYSTABLES"), ref("TABLE", "MYLIB", "MYFILE")], allowed));
+  assert.throws(() => assertSystemOnly([ref("TABLE", "MYLIB", "MYFILE"), ref("TABLE", "MYLIB", "OTHER")], allowed), /refusing MYLIB\.OTHER/);
+  assert.throws(() => assertSystemOnly([ref("TABLE", "OTHERLIB", "MYFILE")], allowed), /refusing OTHERLIB\.MYFILE/);
+  assert.throws(() => assertSystemOnly([ref("TABLE", null, "MYFILE")], allowed), /qualify MYFILE/);
+  assert.throws(() => assertSystemOnly([ref("TABLE", "MYLIB", "MYFILE", "TARGET TABLE")], allowed), /target table/);
+});
+
 test("assertSystemOnly refuses a write target, a statement that is not a query, and an empty report", () => {
   assert.throws(() => assertSystemOnly([ref("TABLE", "QSYS2", "SYSTABLES", "TARGET TABLE")]), /target table/);
   assert.throws(() => assertSystemOnly([ref("TABLE", "QSYS2", "SYSTABLES", "QUERY", "DELETE")]), /delete statement/);
@@ -410,12 +419,14 @@ test("loadProfile reads env and applies defaults", () => {
   assert.equal(p.sourceFileCcsid, 37);
   assert.equal(p.readOnly, false);
   assert.deepEqual(p.blockedCl, []);
+  assert.deepEqual(p.allowedTables, []);
 });
 
 test("loadProfile parses safety options", () => {
-  const p = loadProfile({ ...baseEnv, IBMI_READ_ONLY: "true", IBMI_BLOCKED_CL: "crtpf, dltf" });
+  const p = loadProfile({ ...baseEnv, IBMI_READ_ONLY: "true", IBMI_BLOCKED_CL: "crtpf, dltf", IBMI_ALLOWED_TABLES: "MYLIB.CUSTMAST, mylib.ordhdr" });
   assert.equal(p.readOnly, true);
   assert.deepEqual(p.blockedCl, ["crtpf", "dltf"]);
+  assert.deepEqual(p.allowedTables, ["mylib.custmast", "mylib.ordhdr"]);
 });
 
 test("IBMI_READ_ONLY fails closed, so a stray space cannot unlock the box", () => {
