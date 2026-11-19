@@ -112,7 +112,7 @@ A real environment variable, if one is set, always takes precedence over a value
 | `IBMI_MAPEPIRE_JAR` | no | | path to a mapepire jar already on the box, instead of the bundled one |
 | `IBMI_READ_ONLY` | no | `false` | `true` disables upload and compile (read, search, and list only) |
 | `IBMI_BLOCKED_CL` | no | | extra CL verbs to refuse as a compile command, comma separated |
-| `IBMI_ALLOWED_TABLES` | no | | user tables `run_system_sql` may also read, written `LIB.TABLE` and comma separated |
+| `IBMI_ALLOWED_TABLES` | no | | user tables `run_system_sql` may also read, comma separated. Written as on the machine, `LIB.TABLE` or `LIB/TABLE`, a generic `LIB.CUST*`, every table in a library `LIB.*` or `LIB.*ALL`, or a table in any library `*ALL.TABLE`. `*ALL.*ALL` opens every user table on the box |
 
 ### Multiple servers
 

@@ -96,6 +96,17 @@ export function assertSelectOnly(statement: string): string {
 
 export const readsSpool = (statement: string) => /\bspooled_file_data\b/i.test(statement);
 
+// matches a name against *all, a generic abc* or an exact name, as CL does
+const nameMatches = (pattern: string, name: string) =>
+  pattern === "*all" || (pattern.endsWith("*") ? name.startsWith(pattern.slice(0, -1)) : name === pattern);
+
+export function tableAllowed(schema: string, name: string, allowedTables: string[]): boolean {
+  return allowedTables.some((e) => {
+    const [lib, table] = e.split(".");
+    return nameMatches(lib, schema.toLowerCase()) && nameMatches(table, name.toLowerCase());
+  });
+}
+
 // checks the object references qsys2.parse_statement reports for a statement
 export function assertSystemOnly(refs: SqlRef[], allowedTables: string[] = []): void {
   if (!refs.length) throw new Error("could not tell what this select reads, so run_system_sql refuses it");
@@ -107,7 +118,7 @@ export function assertSystemOnly(refs: SqlRef[], allowedTables: string[] = []): 
     // unqualified functions are the built ins, such as rtrim and count
     if (r.type === "FUNCTION" && !r.schema) continue;
     if (!r.schema) throw new Error(`qualify ${r.name} with its schema, run_system_sql only reads system information in ${schemas}`);
-    if (SYSTEM_SCHEMAS.includes(r.schema) || allowedTables.includes(`${r.schema}.${r.name}`.toLowerCase())) continue;
+    if (SYSTEM_SCHEMAS.includes(r.schema) || tableAllowed(r.schema, r.name, allowedTables)) continue;
     throw new Error(`refusing ${r.schema}.${r.name}, run_system_sql only reads system information in ${schemas}, never the rows of a user table that IBMI_ALLOWED_TABLES does not name`);
   }
 }

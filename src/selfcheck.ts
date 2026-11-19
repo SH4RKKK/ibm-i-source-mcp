@@ -345,6 +345,27 @@ test("assertSystemOnly reads a table IBMI_ALLOWED_TABLES names, and still refuse
   assert.throws(() => assertSystemOnly([ref("TABLE", "MYLIB", "MYFILE", "TARGET TABLE")], allowed), /target table/);
 });
 
+test("IBMI_ALLOWED_TABLES takes *ALL and generic ABC* names as CL does", () => {
+  const ok = (allowed: string[], schema: string, name: string) => assertSystemOnly([ref("TABLE", schema, name)], allowed);
+  assert.doesNotThrow(() => ok(["mylib.cust*"], "MYLIB", "CUSTMAST"));
+  assert.doesNotThrow(() => ok(["mylib.cust*"], "MYLIB", "CUST"), "a generic name matches the prefix itself");
+  assert.throws(() => ok(["mylib.cust*"], "MYLIB", "ORDHDR"), /refusing MYLIB\.ORDHDR/);
+  assert.throws(() => ok(["mylib.cust*"], "OTHERLIB", "CUSTMAST"), /refusing OTHERLIB\.CUSTMAST/);
+  assert.doesNotThrow(() => ok(["mylib.*all"], "MYLIB", "ANYTHING"));
+  assert.doesNotThrow(() => ok(["mylib.*"], "MYLIB", "ANYTHING"));
+  assert.throws(() => ok(["mylib.*"], "MYLIB2", "ANYTHING"), /refusing MYLIB2\.ANYTHING/);
+  assert.throws(() => ok(["mylib.*all"], "MYLIB2", "ANYTHING"), /refusing MYLIB2\.ANYTHING/);
+  assert.doesNotThrow(() => ok(["*all.custmast"], "ANYLIB", "CUSTMAST"));
+  assert.throws(() => ok(["*all.custmast"], "ANYLIB", "CUSTMAST2"), /refusing ANYLIB\.CUSTMAST2/);
+});
+
+test("loadProfile reads IBMI_ALLOWED_TABLES in the CL forms and refuses anything else", () => {
+  const t = (v: string) => loadProfile({ ...baseEnv, IBMI_ALLOWED_TABLES: v }).allowedTables;
+  assert.deepEqual(t("MYLIB/CUST*, MYLIB.*ALL *ALL/CUSTMAST, TESTLIB.*"), ["mylib.cust*", "mylib.*all", "*all.custmast", "testlib.*"]);
+  for (const bad of ["CUSTMAST", "MYLIB.", "MYLIB/", "MYLIB.**", "MYLIB.CU*ST", "MY*.CUSTMAST", "*LIBL.CUSTMAST", "MYLIB.A.B"])
+    assert.throws(() => t(bad), /IBMI_ALLOWED_TABLES entry/, `${JSON.stringify(bad)} must be refused`);
+});
+
 test("assertSystemOnly refuses a write target, a statement that is not a query, and an empty report", () => {
   assert.throws(() => assertSystemOnly([ref("TABLE", "QSYS2", "SYSTABLES", "TARGET TABLE")]), /target table/);
   assert.throws(() => assertSystemOnly([ref("TABLE", "QSYS2", "SYSTABLES", "QUERY", "DELETE")]), /delete statement/);

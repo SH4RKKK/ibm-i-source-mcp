@@ -51,6 +51,12 @@ const bool = (v: string | undefined, dflt: boolean) => {
   return !t ? dflt : !/^(0|false|no|off)$/.test(t);
 };
 const list = (v: string | undefined) => (v ? v.split(/[,\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean) : []);
+// lib.table, lib/table, lib.abc*, lib.* or lib.*all, with *all also allowed as the library
+const TABLE_ENTRY = /^(\*all|[^.*/]+)[./](\*all|\*|[^.*/]+\*?)$/;
+const tables = (v: string | undefined) => list(v).map((e) => {
+  if (!TABLE_ENTRY.test(e)) throw new Error(`IBMI_ALLOWED_TABLES entry "${e}" is not one of LIB.TABLE, LIB.ABC*, LIB.*, LIB.*ALL or *ALL.TABLE`);
+  return e.replace("/", ".");
+});
 
 export function loadProfile(env: NodeJS.ProcessEnv = process.env): Profile {
   const { IBMI_HOST: host, IBMI_USER: user, IBMI_PASSWORD: password } = env;
@@ -62,6 +68,6 @@ export function loadProfile(env: NodeJS.ProcessEnv = process.env): Profile {
     mapepireJar: env.IBMI_MAPEPIRE_JAR || undefined,
     readOnly: bool(env.IBMI_READ_ONLY, false),
     blockedCl: list(env.IBMI_BLOCKED_CL),
-    allowedTables: list(env.IBMI_ALLOWED_TABLES),
+    allowedTables: tables(env.IBMI_ALLOWED_TABLES),
   };
 }
